@@ -87,7 +87,7 @@ function App() {
                     setInputPackage(e.target.value);
                     setTargetPackage(e.target.value);
                   }}
-                  style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '4px', borderRadius: '4px', fontSize: '0.75rem', width: '130px', cursor: 'pointer' }}
+                  style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '4px', borderRadius: '4px', fontSize: '0.75rem', width: 'auto', maxWidth: '180px', cursor: 'pointer' }}
                 >
                   <option value="">Global System (整機)</option>
                   {availablePackages.map((pkg, idx) => (

@@ -25,8 +25,10 @@ class DeviceMonitor:
 
     def _run_cmd(self, cmd: str) -> str:
         try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=2)
             return result.stdout
+        except subprocess.TimeoutExpired:
+            return ""
         except Exception as e:
             print(f"Command error: {e}")
             return ""
@@ -308,7 +310,7 @@ class DeviceMonitor:
             # CPU
             cpu_percent = 0.0
             try:
-                top_out = self._run_cmd(f"adb shell top -n 1 -d 1 | findstr {self.target}")
+                top_out = self._run_cmd(f"adb shell top -n 1 | findstr {self.target}")
                 if top_out:
                     parts = top_out.strip().split()
                     if len(parts) > 8:

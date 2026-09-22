@@ -80,7 +80,7 @@ body {
 /* ================= 三欄式佈局 (核心) ================= */
 .main-layout {
   display: grid;
-  grid-template-columns: 280px minmax(400px, 4fr) minmax(450px, 5fr);
+  grid-template-columns: 320px minmax(400px, 4fr) minmax(450px, 5fr);
   gap: 2rem;
   flex: 1;
   min-height: 0; /* 讓 Grid 內部可捲動的關鍵 */

@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, memo } from 'react';
 import { createPortal } from 'react-dom';
 import JMuxer from 'jmuxer';
 import { Camera, Video } from 'lucide-react';
 
-const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHeight = 2400, isMockMode = false }) => {
+const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, targetHeight = 2400, isMockMode = false }) => {
   const canvasRef = useRef(null);
   const streamWsRef = useRef(null);
   const controlWsRef = useRef(null);
@@ -11,7 +11,8 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
 
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamDebugMsg, setStreamDebugMsg] = useState("");
-  const [bytesReceived, setBytesReceived] = useState(0);
+  const bytesRef = useRef(0);
+  const bytesTextRef = useRef(null);
   
   // Recording state
   const [isRecordingDevice, setIsRecordingDevice] = useState(false);
@@ -61,6 +62,14 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
         fps: 30,
         debug: false
       });
+      
+      const bytesInterval = setInterval(() => {
+        if (isMounted && bytesTextRef.current) {
+          bytesTextRef.current.innerText = `Bytes Received: ${bytesRef.current.toLocaleString()} bytes`;
+        }
+      }, 1000);
+      
+      streamWsRef.current.bytesInterval = bytesInterval;
     };
 
     streamWsRef.current.onmessage = (event) => {
@@ -72,14 +81,14 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
       }
       
       if (event.data instanceof ArrayBuffer) {
-        setBytesReceived(prev => prev + event.data.byteLength);
+        bytesRef.current += event.data.byteLength;
         if (jmuxerRef.current) {
           jmuxerRef.current.feed({
             video: new Uint8Array(event.data)
           });
         }
       } else if (event.data instanceof Blob) {
-        setBytesReceived(prev => prev + event.data.size);
+        bytesRef.current += event.data.size;
         event.data.arrayBuffer().then(buffer => {
           if (jmuxerRef.current) {
             jmuxerRef.current.feed({
@@ -94,6 +103,9 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
       if (!isMounted) return;
       console.log('Stream WS closed');
       setIsStreaming(false);
+      if (streamWsRef.current && streamWsRef.current.bytesInterval) {
+        clearInterval(streamWsRef.current.bytesInterval);
+      }
     };
     
     streamWsRef.current.onerror = (e) => {
@@ -104,6 +116,7 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
       isMounted = false;
       if (streamWsRef.current) {
         const streamSocket = streamWsRef.current;
+        if (streamSocket.bytesInterval) clearInterval(streamSocket.bytesInterval);
         if (streamSocket.readyState === WebSocket.CONNECTING) {
           streamSocket.onopen = () => streamSocket.close();
         } else if (streamSocket.readyState === WebSocket.OPEN) {
@@ -328,7 +341,7 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
             whiteSpace: 'pre-wrap'
           }}>
             <div>Stream WS: <span style={{color: isStreaming ? '#10b981' : '#f43f5e'}}>{isStreaming ? "Connected" : "Disconnected"}</span></div>
-            <div style={{color: '#94a3b8'}}>Bytes Received: {bytesReceived.toLocaleString()} bytes</div>
+            <div style={{color: '#94a3b8'}} ref={bytesTextRef}>Bytes Received: 0 bytes</div>
             {streamDebugMsg && (
               <div style={{ color: '#f43f5e', marginTop: '5px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '5px' }}>
                 {streamDebugMsg}
@@ -345,6 +358,6 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
       </div>
     </div>
   );
-};
+});
 
 export default DeviceScreen;

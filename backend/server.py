@@ -152,11 +152,12 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
                 if cached_hwnd == 0:
                     def enum_cb(h, _):
                         nonlocal cached_hwnd
+                        import ctypes
                         length = ctypes.windll.user32.GetWindowTextLengthW(h)
                         if length > 0:
                             buff = ctypes.create_unicode_buffer(length + 1)
                             ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
-                            if "PerfHub_Scrcpy" in buff.value:
+                            if buff.value == "PerfHub_Scrcpy":
                                 cached_hwnd = h
                                 return False # Stop enumerating
                         return True
@@ -260,6 +261,7 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
         return
         
     process = None
+    scrcpy_proc = None
     try:
         try:
             monitor = DeviceMonitor(target=target, os_type="android", mock=is_mock)
@@ -274,11 +276,10 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
             await websocket.close()
             return
             
-        # Scrcpy v2+ removed raw h264 record format. We must record to mkv and extract with ffmpeg.
-        # Use scrcpy with ffmpeg via shell pipe.
-        # CRITICAL: Kill any zombie scrcpy instances on the PC to prevent port conflicts!
+        # Kill any zombie scrcpy instances on the PC to prevent port conflicts!
         try:
             subprocess.run(["taskkill", "/F", "/IM", "scrcpy.exe"], capture_output=True, timeout=2)
+            subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=2)
             await asyncio.sleep(0.5)
         except:
             pass
@@ -288,35 +289,32 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
         # Increased quality: max size 1920, bitrate 4M
         scrcpy_cmd = ["scrcpy", "-m", "1920", "-b", "4M", "--max-fps=30", "--render-driver=software", "--window-title", "PerfHub_Scrcpy", "--no-audio"]
         
-        global scrcpy_proc
-        if 'scrcpy_proc' not in globals() or scrcpy_proc is None or scrcpy_proc.poll() is not None:
-            print("Spawning new scrcpy window...")
-            scrcpy_proc = subprocess.Popen(scrcpy_cmd)
-            # Wait dynamically for the scrcpy window to appear
-            window_found = False
-            for _ in range(20):
-                def enum_cb_wait(h, _):
-                    nonlocal window_found
-                    length = ctypes.windll.user32.GetWindowTextLengthW(h)
-                    if length > 0:
-                        buff = ctypes.create_unicode_buffer(length + 1)
-                        ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
-                        if "PerfHub_Scrcpy" in buff.value:
-                            window_found = True
-                            return False
-                    return True
-                
+        print("Spawning new scrcpy window...")
+        scrcpy_proc = subprocess.Popen(scrcpy_cmd)
+        
+        # Wait dynamically for the scrcpy window to appear
+        window_found = False
+        for _ in range(20):
+            def enum_cb_wait(h, _):
+                nonlocal window_found
                 import ctypes
-                CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
-                ctypes.windll.user32.EnumWindows(CMPFUNC(enum_cb_wait), 0)
-                
-                if window_found:
-                    break
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(0.5) # Give it an extra moment to render
-        else:
-            print("Reusing existing scrcpy window...")
+                length = ctypes.windll.user32.GetWindowTextLengthW(h)
+                if length > 0:
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
+                    if buff.value == "PerfHub_Scrcpy":
+                        window_found = True
+                        return False
+                return True
+            
+            import ctypes
+            CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+            ctypes.windll.user32.EnumWindows(CMPFUNC(enum_cb_wait), 0)
+            
+            if window_found:
+                break
             await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5) # Give it an extra moment to render
         
         # Capture the window using ffmpeg gdigrab and output raw H.264
         # We use a fixed output resolution of 720x1560 to prevent JMuxer crashes when the window is resized.
@@ -357,6 +355,7 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
             except:
                 pass
                 
+        asyncio.create_task(drain_stderr(scrcpy_proc, "Scrcpy"))
         asyncio.create_task(drain_stderr(process, "Stream"))
             
         while True:
@@ -378,14 +377,18 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
     except Exception as e:
         print(f"Stream outer error: {e}")
     finally:
-        # We must reference process if it was created
-        if 'process' in locals() and process:
+        if process:
             try:
                 process.terminate()
                 process.wait()
             except:
                 pass
-        # Do NOT terminate scrcpy_proc here! We want to reuse it across HMR reloads.
+        if scrcpy_proc:
+            try:
+                scrcpy_proc.terminate()
+                scrcpy_proc.wait()
+            except:
+                pass
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket, target: str = "", os: str = "android", mock: str = "false"):
