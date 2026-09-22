@@ -4,7 +4,7 @@ const MAX_DATA_POINTS = 60; // 60 seconds sliding window
 
 export function useWebSocket(url, target = "com.example.app", isMockMode = false) {
   const [data, setData] = useState([]);
-  const [currentMetrics, setCurrentMetrics] = useState({ cpu_percent: 0, memory_mb: 0, fps: 0, rx_kbps: 0, tx_kbps: 0 });
+  const [currentMetrics, setCurrentMetrics] = useState({ cpu_percent: 0, memory_mb: 0, fps: 0, rx_kbps: 0, tx_kbps: 0, foreground_app: '等待數據...' });
   const [deviceInfo, setDeviceInfo] = useState({
     model: '等待數據...',
     resolution_w: 1080,
@@ -21,7 +21,7 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
   const dataRef = useRef([]);
   const isRecordingRef = useRef(isRecording);
   const mockIntervalRef = useRef(null);
-  const mockMetricsRef = useRef({ cpu: 30.0, memory: 300.0, fps: 60.0, rx: 0, tx: 0 });
+  const mockMetricsRef = useRef({ cpu: 30.0, memory: 300.0, fps: 60.0, rx: 0, tx: 0, foreground_app: 'Google Chrome 瀏覽器' });
 
   useEffect(() => {
     isRecordingRef.current = isRecording;
@@ -47,7 +47,10 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
         resolution_w: 1080,
         resolution_h: 2400,
         target_package: target,
-        os_version: 'Frontend Mock OS'
+        os_version: 'Frontend Mock OS',
+        wifi_ssid: 'Mock WiFi',
+        wifi_ip: '192.168.1.100',
+        vpn_ip: '未連線'
       });
 
       mockIntervalRef.current = setInterval(() => {
@@ -58,6 +61,12 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
         m.fps = Math.max(10, Math.min(60, m.fps + (Math.random() * 4 - 2)));
         m.rx = Math.max(0, m.rx + (Math.random() * 100 - 50));
         m.tx = Math.max(0, m.tx + (Math.random() * 50 - 25));
+        
+        // Randomly switch foreground app in mock mode
+        if (Math.random() < 0.05) {
+            const apps = ['Google Chrome 瀏覽器', 'Firefox 瀏覽器', '其他 (com.facebook.katana)', '其他 (com.android.settings)'];
+            m.foreground_app = apps[Math.floor(Math.random() * apps.length)];
+        }
 
         const metricsObj = {
           cpu_percent: parseFloat(m.cpu.toFixed(1)),
@@ -130,17 +139,27 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
           setDeviceInfo(payload.device_info);
         }
 
+        const metricsObj = {
+          cpu_percent: payload.metrics.cpu_percent,
+          memory_mb: payload.metrics.memory_mb,
+          fps: payload.metrics.fps,
+          rx_kbps: payload.metrics.rx_kbps,
+          tx_kbps: payload.metrics.tx_kbps,
+          foreground_app: payload.metrics.foreground_app || '等待數據...'
+        };
+
         const newPoint = {
           time: new Date(payload.timestamp).toLocaleTimeString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          cpu: payload.metrics.cpu_percent,
-          memory: payload.metrics.memory_mb,
-          fps: payload.metrics.fps,
-          rx: payload.metrics.rx_kbps,
-          tx: payload.metrics.tx_kbps,
+          cpu: metricsObj.cpu_percent,
+          memory: metricsObj.memory_mb,
+          fps: metricsObj.fps,
+          rx: metricsObj.rx_kbps,
+          tx: metricsObj.tx_kbps,
+          foreground_app: metricsObj.foreground_app,
           timestamp: payload.timestamp
         };
 
-        setCurrentMetrics(payload.metrics);
+        setCurrentMetrics(metricsObj);
 
         if (isRecordingRef.current) {
             setData((prevData) => {

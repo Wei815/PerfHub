@@ -102,6 +102,18 @@ function App() {
                 </div>
               )}
               <div className="info-item">
+                <span className="label">WiFi 網路</span>
+                <span className="value">{status === 'error' || !deviceInfo?.wifi_ssid ? '等待數據...' : deviceInfo.wifi_ssid}</span>
+              </div>
+              <div className="info-item">
+                <span className="label">IP 位置</span>
+                <span className="value">{status === 'error' || !deviceInfo?.wifi_ip ? '等待數據...' : deviceInfo.wifi_ip}</span>
+              </div>
+              <div className="info-item">
+                <span className="label">VPN IP</span>
+                <span className="value">{status === 'error' || !deviceInfo?.vpn_ip ? '未連線' : (deviceInfo.vpn_ip === 'Unknown' ? '未連線' : deviceInfo.vpn_ip)}</span>
+              </div>
+              <div className="info-item">
                 <span className="label">畫面比例</span>
                 <span className="value">{status === 'error' || !deviceInfo?.resolution_w ? '等待數據...' : `${deviceInfo.resolution_w}:${deviceInfo.resolution_h}`}</span>
               </div>
@@ -248,7 +260,7 @@ function App() {
             </div>
           </div>
           
-          <div style={{ height: '250px', flexShrink: 0, marginTop: '1rem', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ height: '120px', flexShrink: 0, marginTop: '1rem', display: 'flex', flexDirection: 'column' }}>
             <LogTerminal target={targetPackage} isMockMode={isMockMode} />
           </div>
         </aside>

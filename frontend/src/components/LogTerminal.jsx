@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { Trash2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Trash2, Copy, Check } from 'lucide-react';
 
 const LogTerminal = ({ target = 'com.example.app', isMockMode = false }) => {
   const [logs, setLogs] = useState([]);
@@ -51,8 +51,22 @@ const LogTerminal = ({ target = 'com.example.app', isMockMode = false }) => {
       const spamKeywords = [
         'WifiHAL', 'WificondControl', 'Thermal-daemon', 'BDLog', 
         'NotificationInflation23', 'JankService', 'HwChrExceptionListener', 
-        'HwCHRWifiFile', 'ZeroHung', 'NetworkManager', 'NetworkMonitor',
-        'zygote', 'libprocessgroup'
+        'HwCHRWifiFile', 'HwCHRWifi', 'ZeroHung', 'NetworkManager', 'NetworkMonitor',
+        'zygote', 'libprocessgroup', 'iMonitor', 'HsmCoreServiceImpl',
+        'ro.config.vol_steps', 'register_com_android_internal_os_Zygote',
+        'DateView', 'ndroid.systemu', 'HwLauncher', 'HwRecSys', 'HiBoard',
+        'HwID', 'FastSDKEngine', 'ProcessInfoCollector', 'MemoryLeakMonitorManager',
+        'FileLogNode', 'HiAdKit', 'UpdateVersionManager', 'teec_app_load',
+        'IpCountryUtil', 'AIDLLoginManager', 'HSM_BG', 'dubaid', 'storaged',
+        'WifiProCHRManager', 'HwLocation', 'HwXmlLogParse', 'HwReportTool',
+        'AppInfoMgr', 'Feedback_', 'setgid: Operation not permitted', 'EasyInvokeUtils',
+        'ro.vr_display.service', 'ro.kirin.product.platform', 'HwExtendedCodec',
+        'OMXNodeInstance', 'HWComposer', 'iptables cmd', 'ZrHungImpl',
+        'AuthPII', 'Not starting debugger since process cannot load the jdwp agent',
+        'HwGrsSdk', 'HwConnectivityService', 'CloudAlbumSDK', 'AppLifeChangeSensor',
+        'Hicom_PolicyCenterService', 'AwareLog', 'XEngineMpipControl', 'DollieAdapterService',
+        'BufferQueueProducer', 'SpannableStringBuilder', 'chromium', 'ServiceManager',
+        'Parcel  :', 'blob    :'
       ];
       if (spamKeywords.some(kw => rawText.includes(kw))) {
         return; // 直接略過，不上螢幕
@@ -109,7 +123,17 @@ const LogTerminal = ({ target = 'com.example.app', isMockMode = false }) => {
     }
   }, [logs]);
 
+  const [isCopied, setIsCopied] = useState(false);
+
   const clearLogs = () => setLogs([]);
+
+  const copyLogs = () => {
+    const textToCopy = logs.map(log => log.text + (log.annotation ? ' // ' + log.annotation : '')).join('\n');
+    navigator.clipboard.writeText(textToCopy).then(() => {
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    });
+  };
 
   const getLogStyle = (text) => {
     if (text.includes('E/') || text.includes('Exception') || text.includes('Error') || text.includes('錯誤')) {
@@ -128,7 +152,12 @@ const LogTerminal = ({ target = 'com.example.app', isMockMode = false }) => {
     <div className="log-terminal-container">
       <div className="log-header">
         <span className="log-title">Logcat Terminal</span>
-        <button className="log-clear-btn" onClick={clearLogs} title="Clear Logs"><Trash2 size={14} /></button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button className="log-clear-btn" onClick={copyLogs} title="Copy Logs">
+            {isCopied ? <Check size={14} color="#10b981" /> : <Copy size={14} />}
+          </button>
+          <button className="log-clear-btn" onClick={clearLogs} title="Clear Logs"><Trash2 size={14} /></button>
+        </div>
       </div>
       <div className="log-body">
         {logs.map((log, idx) => (

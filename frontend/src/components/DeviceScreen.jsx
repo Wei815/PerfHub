@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import JMuxer from 'jmuxer';
+import { Camera, Video } from 'lucide-react';
 
 const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHeight = 2400, isMockMode = false }) => {
   const canvasRef = useRef(null);
@@ -11,6 +12,11 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamDebugMsg, setStreamDebugMsg] = useState("");
   const [bytesReceived, setBytesReceived] = useState(0);
+  
+  // Recording state
+  const [isRecordingDevice, setIsRecordingDevice] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const recordedChunks = useRef([]);
   
   // Drag state for swipe
   const isDragging = useRef(false);
@@ -128,10 +134,12 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
     const offsetY = e.clientY - rect.top;
     
     // mapping
-    const realX = Math.round((offsetX / rect.width) * targetWidth);
-    const realY = Math.round((offsetY / rect.height) * targetHeight);
+    const relX = offsetX / rect.width;
+    const relY = offsetY / rect.height;
+    const realX = Math.round(relX * targetWidth);
+    const realY = Math.round(relY * targetHeight);
     
-    return { realX, realY };
+    return { realX, realY, relX, relY };
   };
 
   const sendControl = (payload) => {
@@ -142,39 +150,21 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
 
   const handleMouseDown = (e) => {
     isDragging.current = true;
-    const { realX, realY } = getRealCoords(e);
-    startPos.current = { x: realX, y: realY };
-    startTime.current = Date.now();
+    const { relX, relY } = getRealCoords(e);
+    sendControl({ action: 'down', relX, relY });
+  };
+
+  const handleMouseMove = (e) => {
+    if (!isDragging.current) return;
+    const { relX, relY } = getRealCoords(e);
+    sendControl({ action: 'move', relX, relY });
   };
 
   const handleMouseUp = (e) => {
     if (!isDragging.current) return;
     isDragging.current = false;
-    
-    const { realX, realY } = getRealCoords(e);
-    const duration = Date.now() - startTime.current;
-    
-    // If it's a quick click and distance is small, it's a tap
-    const distance = Math.sqrt(Math.pow(realX - startPos.current.x, 2) + Math.pow(realY - startPos.current.y, 2));
-    
-    if (distance < 20 && duration < 300) {
-      // Tap
-      sendControl({
-        action: 'tap',
-        x: realX,
-        y: realY
-      });
-    } else {
-      // Swipe
-      sendControl({
-        action: 'swipe',
-        start_x: startPos.current.x,
-        start_y: startPos.current.y,
-        end_x: realX,
-        end_y: realY,
-        duration: Math.min(duration, 2000) // cap duration
-      });
-    }
+    const { relX, relY } = getRealCoords(e);
+    sendControl({ action: 'up', relX, relY });
   };
 
   const handleMouseLeave = (e) => {
@@ -190,14 +180,74 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
     });
   };
 
+  const handleScreenshot = () => {
+    if (!canvasRef.current) return;
+    const video = canvasRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = `screenshot_${new Date().getTime()}.png`;
+    a.click();
+  };
+
+  const handleRecordDevice = () => {
+    if (isRecordingDevice) {
+      if (mediaRecorderRef.current) {
+        mediaRecorderRef.current.stop();
+      }
+      setIsRecordingDevice(false);
+    } else {
+      if (!canvasRef.current) return;
+      const stream = canvasRef.current.captureStream();
+      recordedChunks.current = [];
+      try {
+        const recorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            recordedChunks.current.push(e.data);
+          }
+        };
+        recorder.onstop = () => {
+          const blob = new Blob(recordedChunks.current, { type: 'video/webm' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `record_${new Date().getTime()}.webm`;
+          a.click();
+          URL.revokeObjectURL(url);
+        };
+        recorder.start();
+        mediaRecorderRef.current = recorder;
+        setIsRecordingDevice(true);
+      } catch (err) {
+        console.error("MediaRecorder setup failed:", err);
+      }
+    }
+  };
+
   return (
     <div className="device-screen-container glass-panel flex-1 min-h-0">
-      <h3>Remote Device Screen</h3>
-      <div className="canvas-wrapper" style={{ position: 'relative', display: 'flex', justifyContent: 'center', flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', padding: '0 4px' }}>
+        <h3 style={{ margin: 0, fontSize: '1rem', color: '#f8fafc', fontWeight: '600', letterSpacing: '0.02em' }}>Remote Device Screen</h3>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--accent-color)', border: 'none', borderRadius: '6px', color: '#fff', fontSize: '0.85rem', fontWeight: '500', cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(59, 130, 246, 0.3)' }} onClick={handleScreenshot}>
+            <Camera size={16} /> 截圖
+          </button>
+          <button style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: '6px', background: isRecordingDevice ? '#e11d48' : 'rgba(255, 255, 255, 0.08)', border: isRecordingDevice ? '1px solid #be123c' : '1px solid rgba(255, 255, 255, 0.15)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem', fontWeight: '500', cursor: 'pointer', transition: 'all 0.2s ease', whiteSpace: 'nowrap' }} onClick={handleRecordDevice}>
+            <Video size={16} /> {isRecordingDevice ? '停止錄製' : '錄影'}
+          </button>
+        </div>
+      </div>
+      <div className="canvas-wrapper" style={{ position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1, minHeight: 0 }}>
         {isMockMode ? (
           <div style={{
             height: '100%',
-            width: '100%',
+            maxWidth: '100%',
             aspectRatio: `${targetWidth}/${targetHeight}`,
             background: 'linear-gradient(180deg, #1e293b 0%, #0f172a 100%)',
             border: '1px solid rgba(255,255,255,0.2)',
@@ -245,17 +295,19 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
             }}
             style={{
               height: '100%',
-              width: '100%',
+              maxWidth: '100%',
               aspectRatio: `${targetWidth}/${targetHeight}`,
               backgroundColor: '#000',
               cursor: 'pointer',
               border: '1px solid rgba(255,255,255,0.2)',
               borderRadius: '8px',
-              objectFit: 'contain'
+              objectFit: 'fill'
             }}
             onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseLeave}
+            onDragStart={(e) => e.preventDefault()}
           />
         )}
         {!isMockMode && !isStreaming && !streamDebugMsg && (

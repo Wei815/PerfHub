@@ -65,6 +65,9 @@ class DeviceMonitor:
         model = "Unknown Device"
         res_w, res_h = 1080, 2400
         os_ver = ""
+        wifi_ssid = "Unknown"
+        wifi_ip = "Unknown"
+        vpn_ip = "Unknown"
 
         try:
             if self.os_type == "android":
@@ -81,6 +84,30 @@ class DeviceMonitor:
                 version_out = self._run_cmd("adb shell getprop ro.build.version.release")
                 if version_out:
                     os_ver = version_out.strip()
+                    
+                ip_out = self._run_cmd("adb shell ip addr show wlan0")
+                if ip_out:
+                    ip_match = re.search(r'inet\s+(\d+\.\d+\.\d+\.\d+)', ip_out)
+                    if ip_match:
+                        wifi_ip = ip_match.group(1)
+                        
+                vpn_out = self._run_cmd("adb shell ip addr show tun0")
+                if vpn_out:
+                    vpn_match = re.search(r'inet\s+(\d+\.\d+\.\d+\.\d+)', vpn_out)
+                    if vpn_match:
+                        vpn_ip = vpn_match.group(1)
+                        
+                wifi_out = self._run_cmd('adb shell "dumpsys netstats | grep -E \'iface=wlan.*networkId\'"')
+                if wifi_out:
+                    ssid_match = re.search(r'networkId="([^"]+)"', wifi_out)
+                    if ssid_match:
+                        wifi_ssid = ssid_match.group(1).replace('"', '')
+                if wifi_ssid == "Unknown":
+                    wifi_out_2 = self._run_cmd('adb shell "dumpsys wifi | grep mNetworkInfo"')
+                    if wifi_out_2:
+                        ssid_match = re.search(r'extra: "([^"]+)"', wifi_out_2)
+                        if ssid_match:
+                            wifi_ssid = ssid_match.group(1)
         except Exception:
             pass
             
@@ -89,7 +116,10 @@ class DeviceMonitor:
             "resolution_w": res_w,
             "resolution_h": res_h,
             "target_package": self.target,
-            "os_version": f"Android {os_ver}".strip() if self.os_type == "android" else "iOS"
+            "os_version": f"Android {os_ver}".strip() if self.os_type == "android" else "iOS",
+            "wifi_ssid": wifi_ssid,
+            "wifi_ip": wifi_ip,
+            "vpn_ip": vpn_ip
         }
 
     def get_metrics(self) -> Dict[str, Any]:
@@ -194,13 +224,41 @@ class DeviceMonitor:
         else:
             fps = random.randint(58, 60)
 
+        # Get foreground app (useful for tracking which browser/app is open)
+        foreground_app = "未知"
+        try:
+            fg_out = self._run_cmd('adb shell "dumpsys window windows | grep mCurrentFocus"')
+            if fg_out:
+                match = re.search(r'mCurrentFocus=Window\{[a-zA-Z0-9]+ u\d+ (.*?)/', fg_out)
+                if match:
+                    pkg = match.group(1).strip()
+                    browser_map = {
+                        "com.android.chrome": "Google Chrome",
+                        "org.mozilla.firefox": "Firefox",
+                        "com.microsoft.emmx": "Edge",
+                        "com.brave.browser": "Brave",
+                        "com.UCMobile.intl": "UC Browser",
+                        "com.uc.browser.en": "UC Browser",
+                        "com.opera.browser": "Opera",
+                        "com.sec.android.app.sbrowser": "Samsung Internet",
+                        "com.huawei.browser": "Huawei Browser",
+                        "com.kiwibrowser.browser": "Kiwi Browser"
+                    }
+                    if pkg in browser_map:
+                        foreground_app = f"{browser_map[pkg]} 瀏覽器"
+                    else:
+                        foreground_app = f"其他 ({pkg})"
+        except Exception as e:
+            print(f"Global Foreground App error: {e}")
+
         return {
             "cpu_percent": cpu_percent,
             "memory_mb": memory_mb,
             "fps": fps,
             "rx_kbps": rx_kbps,
             "tx_kbps": tx_kbps,
-            "app_status": "running"
+            "app_status": "running",
+            "foreground_app": foreground_app
         }
 
     def _get_mock_metrics(self) -> Dict[str, Any]:

@@ -115,6 +115,27 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
         
     is_mock = str(mock).lower() == "true"
     
+    # Spawn a persistent ADB shell as fallback
+    shell_proc = None
+    if not is_mock:
+        try:
+            shell_proc = subprocess.Popen(
+                ["adb", "shell"], 
+                stdin=subprocess.PIPE, 
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            print(f"Failed to start persistent adb shell: {e}")
+            
+    import ctypes
+    from ctypes import wintypes
+    
+    # State for fallback swipe/tap detection
+    fallback_state = {}
+    
+    cached_hwnd = 0
+    
     try:
         while True:
             try:
@@ -123,17 +144,91 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
                     continue
                 payload = json.loads(data)
                 action = payload.get("action")
-                cmd = None
-                if action == "tap":
-                    cmd = f"adb shell input tap {payload['x']} {payload['y']}"
-                elif action == "swipe":
-                    cmd = f"adb shell input swipe {payload['start_x']} {payload['start_y']} {payload['end_x']} {payload['end_y']} {payload.get('duration', 300)}"
-                elif action == "keyevent":
-                    cmd = f"adb shell input keyevent {payload['keycode']}"
                 
-                if cmd:
-                    process = subprocess.Popen(cmd, shell=True)
-                    await asyncio.to_thread(process.wait)
+                # Check if cached hwnd is still valid
+                if cached_hwnd != 0 and not ctypes.windll.user32.IsWindow(cached_hwnd):
+                    cached_hwnd = 0
+                
+                if cached_hwnd == 0:
+                    def enum_cb(h, _):
+                        nonlocal cached_hwnd
+                        length = ctypes.windll.user32.GetWindowTextLengthW(h)
+                        if length > 0:
+                            buff = ctypes.create_unicode_buffer(length + 1)
+                            ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
+                            if "PerfHub_Scrcpy" in buff.value:
+                                cached_hwnd = h
+                                return False # Stop enumerating
+                        return True
+                    
+                    CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+                    enum_func = CMPFUNC(enum_cb)
+                    ctypes.windll.user32.EnumWindows(enum_func, 0)
+                
+                injected = False
+                
+                if cached_hwnd:
+                    hwnd = cached_hwnd
+                    rect = wintypes.RECT()
+                    ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
+                    w = rect.right - rect.left
+                    h = rect.bottom - rect.top
+                    
+                    if w > 0 and h > 0:
+                        if action == "down" and "relX" in payload:
+                            cx = int(payload["relX"] * w)
+                            cy = int(payload["relY"] * h)
+                            lparam = (cy << 16) | (cx & 0xFFFF)
+                            ctypes.windll.user32.PostMessageW(hwnd, 0x0200, 0, lparam)
+                            ctypes.windll.user32.PostMessageW(hwnd, 0x0201, 1, lparam)
+                            injected = True
+                        elif action == "move" and "relX" in payload:
+                            cx = int(payload["relX"] * w)
+                            cy = int(payload["relY"] * h)
+                            lparam = (cy << 16) | (cx & 0xFFFF)
+                            ctypes.windll.user32.PostMessageW(hwnd, 0x0200, 1, lparam)
+                            injected = True
+                        elif action == "up" and "relX" in payload:
+                            cx = int(payload["relX"] * w)
+                            cy = int(payload["relY"] * h)
+                            lparam = (cy << 16) | (cx & 0xFFFF)
+                            ctypes.windll.user32.PostMessageW(hwnd, 0x0200, 0, lparam)
+                            ctypes.windll.user32.PostMessageW(hwnd, 0x0202, 0, lparam)
+                            injected = True
+                        elif action == "keyevent":
+                            # Keyevents can also be injected, but we rely on fallback for now
+                            pass
+                
+                # If 0ms injection failed (e.g. window not found or keyevent), fallback to adb shell
+                if not injected:
+                    cmd_str = ""
+                    if action == "down":
+                        fallback_state['x'] = payload.get('relX', 0) * 1080 # Approx fallback scale
+                        fallback_state['y'] = payload.get('relY', 0) * 2400
+                        fallback_state['time'] = asyncio.get_event_loop().time()
+                    elif action == "up":
+                        if 'x' in fallback_state:
+                            end_x = payload.get('relX', 0) * 1080
+                            end_y = payload.get('relY', 0) * 2400
+                            duration = (asyncio.get_event_loop().time() - fallback_state['time']) * 1000
+                            dist = ((end_x - fallback_state['x'])**2 + (end_y - fallback_state['y'])**2)**0.5
+                            
+                            if dist < 20 and duration < 300:
+                                # Use cmd input tap for faster fallback
+                                cmd_str = f"cmd input tap {int(end_x)} {int(end_y)}\n"
+                            else:
+                                cmd_str = f"cmd input swipe {int(fallback_state['x'])} {int(fallback_state['y'])} {int(end_x)} {int(end_y)} {min(int(duration), 2000)}\n"
+                            fallback_state.clear()
+                    elif action == "tap": # Legacy fallback
+                        cmd_str = f"cmd input tap {payload['x']} {payload['y']}\n"
+                    elif action == "swipe": # Legacy fallback
+                        cmd_str = f"cmd input swipe {payload['start_x']} {payload['start_y']} {payload['end_x']} {payload['end_y']} {payload.get('duration', 300)}\n"
+                    elif action == "keyevent":
+                        cmd_str = f"cmd input keyevent {payload['keycode']}\n"
+                    
+                    if cmd_str and shell_proc and shell_proc.poll() is None:
+                        shell_proc.stdin.write(cmd_str.encode('utf-8'))
+                        shell_proc.stdin.flush()
             except WebSocketDisconnect:
                 print("Control client disconnected")
                 break
@@ -145,6 +240,13 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
         print("Control client disconnected")
     except Exception as e:
         print(f"Control outer error: {e}")
+    finally:
+        if shell_proc:
+            try:
+                shell_proc.stdin.close()
+                shell_proc.terminate()
+            except:
+                pass
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "false"):
@@ -174,25 +276,57 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
             
         # Scrcpy v2+ removed raw h264 record format. We must record to mkv and extract with ffmpeg.
         # Use scrcpy with ffmpeg via shell pipe.
-        # CRITICAL: Kill any zombie scrcpy-server instances on the Android device!
+        # CRITICAL: Kill any zombie scrcpy instances on the PC to prevent port conflicts!
         try:
-            subprocess.run(["adb", "shell", "pkill", "app_process"], capture_output=True, timeout=2)
+            subprocess.run(["taskkill", "/F", "/IM", "scrcpy.exe"], capture_output=True, timeout=2)
             await asyncio.sleep(0.5)
         except:
             pass
 
-        # We must use gdigrab because --record=- causes Server connection failed on this specific Windows machine.
+        # We MUST use gdigrab because --record=- causes Server connection failed (pipe/CRLF corruption) on this specific Windows machine.
         # Force software rendering so gdigrab can capture it correctly!
-        scrcpy_cmd = ["scrcpy", "-m", "1024", "-b", "1M", "--max-fps=30", "--render-driver=software", "--window-title", "PerfHub_Scrcpy", "--no-audio"]
-        global scrcpy_proc
-        scrcpy_proc = subprocess.Popen(scrcpy_cmd)
+        # Increased quality: max size 1920, bitrate 4M
+        scrcpy_cmd = ["scrcpy", "-m", "1920", "-b", "4M", "--max-fps=30", "--render-driver=software", "--window-title", "PerfHub_Scrcpy", "--no-audio"]
         
-        # Wait for the scrcpy window to appear on the desktop
-        await asyncio.sleep(2.0)
+        global scrcpy_proc
+        if 'scrcpy_proc' not in globals() or scrcpy_proc is None or scrcpy_proc.poll() is not None:
+            print("Spawning new scrcpy window...")
+            scrcpy_proc = subprocess.Popen(scrcpy_cmd)
+            # Wait dynamically for the scrcpy window to appear
+            window_found = False
+            for _ in range(20):
+                def enum_cb_wait(h, _):
+                    nonlocal window_found
+                    length = ctypes.windll.user32.GetWindowTextLengthW(h)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
+                        if "PerfHub_Scrcpy" in buff.value:
+                            window_found = True
+                            return False
+                    return True
+                
+                import ctypes
+                CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+                ctypes.windll.user32.EnumWindows(CMPFUNC(enum_cb_wait), 0)
+                
+                if window_found:
+                    break
+                await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5) # Give it an extra moment to render
+        else:
+            print("Reusing existing scrcpy window...")
+            await asyncio.sleep(0.5)
         
         # Capture the window using ffmpeg gdigrab and output raw H.264
-        # Add -vf scale=512:1104 to force a fixed resolution! If the user resizes the window, the H264 decoder will crash if the resolution changes mid-stream.
-        ffmpeg_cmd = ["ffmpeg", "-loglevel", "warning", "-f", "gdigrab", "-framerate", "30", "-i", "title=PerfHub_Scrcpy", "-vf", "scale=512:1104", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-f", "h264", "pipe:1"]
+        # We use a fixed output resolution of 720x1560 to prevent JMuxer crashes when the window is resized.
+        # force_original_aspect_ratio=decrease and pad ensures the aspect ratio is strictly preserved without stretching!
+        vf_scale = "scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:(ow-iw)/2:(oh-ih)/2"
+        ffmpeg_cmd = [
+            "ffmpeg", "-loglevel", "warning", "-f", "gdigrab", "-framerate", "30", "-i", "title=PerfHub_Scrcpy", 
+            "-vf", vf_scale, 
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "22", "-f", "h264", "pipe:1"
+        ]
         process = subprocess.Popen(
             ffmpeg_cmd,
             stdout=subprocess.PIPE,
@@ -251,12 +385,7 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
                 process.wait()
             except:
                 pass
-        if 'scrcpy_proc' in locals() and scrcpy_proc:
-            try:
-                scrcpy_proc.terminate()
-                scrcpy_proc.wait()
-            except:
-                pass
+        # Do NOT terminate scrcpy_proc here! We want to reuse it across HMR reloads.
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket, target: str = "", os: str = "android", mock: str = "false"):
