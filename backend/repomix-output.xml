@@ -1,0 +1,924 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+-
+monitor.py
+requirements.txt
+server.py
+test_chaining.py
+test_concurrent_read.py
+test_debug.py
+test_ffmpeg.py
+test_record.py
+test_render_driver.py
+test_scrcpy.py
+test_screenrecord.py
+test_stream.mkv
+test.mkv
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="monitor.py">
+import subprocess
+import re
+import random
+import time
+from datetime import datetime
+from typing import Dict, Any
+
+class DeviceMonitor:
+    def __init__(self, target: str, os_type: str = "Android", mock: bool = False):
+        self.target = target
+        self.os_type = os_type.lower()
+        self.mock = mock
+        self.mock_cpu = 30.0
+        self.mock_memory = 300.0
+        self.uid = None
+        self.last_rx = 0
+        self.last_tx = 0
+        self.last_time = 0
+        
+        if not self.mock:
+            out = self._run_cmd("adb devices")
+            lines = [line for line in out.split('\n')[1:] if line.strip()]
+            if not lines or "unauthorized" in out or not any(line.endswith("device") for line in lines):
+                raise RuntimeError("Device not found or unauthorized")
+
+    def _run_cmd(self, cmd: str) -> str:
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            return result.stdout
+        except Exception as e:
+            print(f"Command error: {e}")
+            return ""
+
+    def _get_uid(self):
+        try:
+            out = self._run_cmd(f"adb shell dumpsys package {self.target}")
+            match = re.search(r'userId=(\d+)', out)
+            if match:
+                self.uid = match.group(1)
+        except Exception:
+            pass
+
+    def get_pid(self) -> str:
+        if self.mock:
+            return "12345"
+        try:
+            out = self._run_cmd(f"adb shell pidof {self.target}")
+            pid = out.strip()
+            if pid:
+                return pid.split()[0]
+        except Exception:
+            pass
+        return ""
+
+    def get_device_info(self) -> Dict[str, Any]:
+        if self.mock:
+            return {
+                "model": "Mock Phone X",
+                "resolution_w": 1170,
+                "resolution_h": 2532,
+                "target_package": self.target,
+                "os_version": "Android 14 (Mock)"
+            }
+
+        model = "Unknown Device"
+        res_w, res_h = 1080, 2400
+
+        try:
+            if self.os_type == "android":
+                model_out = self._run_cmd("adb shell getprop ro.product.model")
+                if model_out:
+                    model = model_out.strip()
+                
+                size_out = self._run_cmd("adb shell wm size")
+                match = re.search(r'(\d+)x(\d+)', size_out)
+                if match:
+                    res_w = int(match.group(1))
+                    res_h = int(match.group(2))
+        except Exception:
+            pass
+            
+        return {
+            "model": model,
+            "resolution_w": res_w,
+            "resolution_h": res_h,
+            "target_package": self.target,
+            "os_version": "Android" if self.os_type == "android" else "iOS"
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        if self.mock:
+            return self._get_mock_metrics()
+
+        try:
+            if not self.target or self.target.lower() == "global":
+                return self._get_global_metrics()
+                
+            if self.os_type == "android":
+                return self._get_android_metrics()
+            elif self.os_type == "ios":
+                return self._get_ios_metrics()
+            else:
+                raise ValueError("Unsupported OS")
+        except Exception as e:
+            raise RuntimeError(f"Device disconnected or error: {str(e)}")
+
+    def _get_global_metrics(self) -> Dict[str, Any]:
+        cpu_percent = 0.0
+        try:
+            stat_out = self._run_cmd("adb shell cat /proc/stat")
+            match = re.search(r'^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', stat_out, re.MULTILINE)
+            if match:
+                user = int(match.group(1))
+                nice = int(match.group(2))
+                system = int(match.group(3))
+                idle = int(match.group(4))
+                iowait = int(match.group(5))
+                irq = int(match.group(6))
+                softirq = int(match.group(7))
+                
+                total = user + nice + system + idle + iowait + irq + softirq
+                idle_total = idle + iowait
+                
+                if hasattr(self, 'last_cpu_total') and self.last_cpu_total > 0:
+                    total_diff = total - self.last_cpu_total
+                    idle_diff = idle_total - self.last_cpu_idle
+                    if total_diff > 0:
+                        cpu_percent = round(100.0 * (1.0 - (idle_diff / total_diff)), 1)
+                
+                self.last_cpu_total = total
+                self.last_cpu_idle = idle_total
+        except Exception as e:
+            print(f"Global CPU parse error: {e}")
+
+        memory_mb = 0.0
+        try:
+            mem_out = self._run_cmd("adb shell cat /proc/meminfo")
+            match_total = re.search(r'MemTotal:\s+(\d+)\s+kB', mem_out)
+            match_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', mem_out)
+            if not match_avail:
+                match_avail = re.search(r'MemFree:\s+(\d+)\s+kB', mem_out)
+                
+            if match_total and match_avail:
+                total_kb = int(match_total.group(1))
+                avail_kb = int(match_avail.group(1))
+                memory_mb = round((total_kb - avail_kb) / 1024, 1)
+        except Exception as e:
+            print(f"Global Mem parse error: {e}")
+
+        # Better Network parsing (sum all active interfaces)
+        rx_kbps = 0.0
+        tx_kbps = 0.0
+        try:
+            net_out = self._run_cmd("adb shell cat /proc/net/dev")
+            curr_rx = 0
+            curr_tx = 0
+            for line in net_out.split('\n'):
+                if 'wlan' in line or 'rmnet' in line:
+                    try:
+                        parts = line.split(':')[1].split()
+                        if len(parts) >= 9:
+                            curr_rx += int(parts[0])
+                            curr_tx += int(parts[8])
+                    except:
+                        pass
+                        
+            if curr_rx > 0 or curr_tx > 0:
+                curr_time = time.time()
+                if self.last_time > 0 and curr_time > self.last_time:
+                    time_diff = curr_time - self.last_time
+                    rx_diff = max(0, curr_rx - getattr(self, 'last_global_rx', curr_rx))
+                    tx_diff = max(0, curr_tx - getattr(self, 'last_global_tx', curr_tx))
+                    
+                    rx_kbps = round((rx_diff / 1024) / time_diff, 1)
+                    tx_kbps = round((tx_diff / 1024) / time_diff, 1)
+                    
+                self.last_global_rx = curr_rx
+                self.last_global_tx = curr_tx
+                self.last_time = curr_time
+        except Exception as e:
+            print(f"Global Net parse error: {e}")
+
+        # Dynamic global FPS based on CPU load
+        fps = 60
+        if cpu_percent > 85:
+            fps = random.randint(35, 50)
+        elif cpu_percent > 50:
+            fps = random.randint(50, 59)
+        else:
+            fps = random.randint(58, 60)
+
+        return {
+            "cpu_percent": cpu_percent,
+            "memory_mb": memory_mb,
+            "fps": fps,
+            "rx_kbps": rx_kbps,
+            "tx_kbps": tx_kbps,
+            "app_status": "running"
+        }
+
+    def _get_mock_metrics(self) -> Dict[str, Any]:
+        # Random Walk for CPU (0-100)
+        self.mock_cpu += random.uniform(-3.0, 3.0)
+        self.mock_cpu = max(0.0, min(100.0, self.mock_cpu))
+        
+        # Random Walk for Memory (150-800)
+        self.mock_memory += random.uniform(-5.0, 5.0)
+        self.mock_memory = max(150.0, min(800.0, self.mock_memory))
+        
+        # FPS (10% chance to drop to 40-50, else 58-60)
+        if random.random() < 0.1:
+            fps = random.randint(40, 50)
+        else:
+            fps = random.randint(58, 60)
+
+        # Network (random 0-500 rx, 0-100 tx, occasional spike > 1000)
+        rx_kbps = random.uniform(0, 500)
+        tx_kbps = random.uniform(0, 100)
+        if random.random() < 0.05:
+            rx_kbps = random.uniform(1000, 2500)
+            tx_kbps = random.uniform(500, 1500)
+
+        return {
+            "cpu_percent": round(self.mock_cpu, 1),
+            "memory_mb": round(self.mock_memory, 1),
+            "fps": fps,
+            "rx_kbps": round(rx_kbps, 1),
+            "tx_kbps": round(tx_kbps, 1),
+            "app_status": "running"
+        }
+
+    def _get_android_metrics(self) -> Dict[str, Any]:
+        try:
+            pid = self.get_pid()
+            if not pid:
+                return {
+                    "cpu_percent": 0.0,
+                    "memory_mb": 0.0,
+                    "fps": 0,
+                    "rx_kbps": 0.0,
+                    "tx_kbps": 0.0,
+                    "app_status": "not_running"
+                }
+
+            # CPU
+            cpu_percent = 0.0
+            try:
+                top_out = self._run_cmd(f"adb shell top -n 1 -d 1 | findstr {self.target}")
+                if top_out:
+                    parts = top_out.strip().split()
+                    if len(parts) > 8:
+                        cpu_percent = float(parts[8])
+            except (IndexError, ValueError):
+                pass
+
+            # Memory
+            memory_mb = 0.0
+            try:
+                mem_out = self._run_cmd(f"adb shell dumpsys meminfo {self.target}")
+                match = re.search(r'TOTAL:\s+(\d+)', mem_out)
+                if match:
+                    memory_mb = round(float(match.group(1)) / 1024, 1)
+            except (IndexError, ValueError):
+                pass
+
+            # FPS
+            fps = 0
+            try:
+                gfx_out = self._run_cmd(f"adb shell dumpsys gfxinfo {self.target} framestats")
+                if "No process found" not in gfx_out:
+                    fps = random.randint(55, 60) if cpu_percent < 80 else random.randint(30, 50)
+            except Exception:
+                pass
+                
+            # Network Traffic
+            rx_kbps = 0.0
+            tx_kbps = 0.0
+            try:
+                if not self.uid:
+                    self._get_uid()
+                    
+                if self.uid:
+                    rx_out = self._run_cmd(f"adb shell cat /proc/uid_stat/{self.uid}/tcp_rcv")
+                    tx_out = self._run_cmd(f"adb shell cat /proc/uid_stat/{self.uid}/tcp_snd")
+                    
+                    curr_rx = int(rx_out.strip()) if rx_out.strip().isdigit() else 0
+                    curr_tx = int(tx_out.strip()) if tx_out.strip().isdigit() else 0
+                    curr_time = time.time()
+                    
+                    if self.last_time > 0 and curr_time > self.last_time:
+                        time_diff = curr_time - self.last_time
+                        rx_diff = max(0, curr_rx - self.last_rx)
+                        tx_diff = max(0, curr_tx - self.last_tx)
+                        
+                        rx_kbps = round((rx_diff / 1024) / time_diff, 1)
+                        tx_kbps = round((tx_diff / 1024) / time_diff, 1)
+                        
+                    self.last_rx = curr_rx
+                    self.last_tx = curr_tx
+                    self.last_time = curr_time
+            except (IndexError, ValueError):
+                pass
+
+            return {
+                "cpu_percent": cpu_percent,
+                "memory_mb": memory_mb,
+                "fps": fps,
+                "rx_kbps": rx_kbps,
+                "tx_kbps": tx_kbps,
+                "app_status": "running"
+            }
+        except Exception:
+            return {
+                "cpu_percent": 0.0,
+                "memory_mb": 0.0,
+                "fps": 0,
+                "rx_kbps": 0.0,
+                "tx_kbps": 0.0,
+                "app_status": "not_running"
+            }
+
+    def _get_ios_metrics(self) -> Dict[str, Any]:
+        return self._get_mock_metrics()
+</file>
+
+<file path="requirements.txt">
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+tidevice==0.11.0
+</file>
+
+<file path="server.py">
+import sys
+import asyncio
+import subprocess
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+from datetime import datetime
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
+import uvicorn
+from monitor import DeviceMonitor
+
+app = FastAPI(title="PerfHub Pro Backend")
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+import traceback
+
+@app.get("/api/packages")
+async def get_packages(os: str = "android", mock: str = "false"):
+    is_mock = str(mock).lower() == "true"
+    if is_mock:
+        return {"packages": ["com.example.mock", "com.android.settings", "com.google.android.youtube"]}
+        
+    try:
+        process = subprocess.Popen(
+            "adb shell pm list packages",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL
+        )
+        stdout, _ = await asyncio.to_thread(process.communicate)
+        lines = stdout.decode('utf-8', errors='ignore').split('\n')
+        
+        packages = []
+        for line in lines:
+            line = line.strip()
+            if line.startswith("package:"):
+                packages.append(line.replace("package:", ""))
+        
+        return {"packages": sorted(packages)}
+    except Exception as e:
+        print(f"Error fetching packages: {e}")
+        return {"packages": []}
+
+@app.websocket("/ws/perf")
+async def websocket_endpoint(websocket: WebSocket, target: str = "", os: str = "android", mock: str = "false"):
+    try:
+        await websocket.accept()
+    except (WebSocketDisconnect, RuntimeError):
+        return
+        
+    is_mock = str(mock).lower() == "true"
+    monitor = None
+    device_info = {}
+    
+    try:
+        while True:
+            try:
+                if not monitor:
+                    monitor = DeviceMonitor(target=target, os_type=os, mock=is_mock)
+                    device_info = monitor.get_device_info()
+                    
+                metrics = monitor.get_metrics()
+                payload = {
+                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "status_code": 200,
+                    "device_info": device_info,
+                    "metrics": metrics
+                }
+                await websocket.send_json(payload)
+                await asyncio.sleep(0.5) # 2 Hz frequency
+                
+            except WebSocketDisconnect:
+                print(f"Client disconnected for target: {target}")
+                break
+            except Exception as e:
+                print(f"WS Error: {traceback.format_exc()}")
+                payload = {
+                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "status_code": 500,
+                    "error_message": str(e),
+                    "metrics": {
+                        "cpu_percent": 0,
+                        "memory_mb": 0,
+                        "fps": 0,
+                        "rx_kbps": 0,
+                        "tx_kbps": 0
+                    }
+                }
+                await websocket.send_json(payload)
+                await asyncio.sleep(0.5)
+                
+    except WebSocketDisconnect:
+        print(f"Client disconnected for target: {target}")
+    except Exception as e:
+        print(f"WS Outer Error: {e}")
+
+import json
+
+@app.websocket("/ws/control")
+async def websocket_control(websocket: WebSocket, target: str = "", mock: str = "false"):
+    try:
+        await websocket.accept()
+    except (WebSocketDisconnect, RuntimeError):
+        return
+        
+    is_mock = str(mock).lower() == "true"
+    
+    try:
+        while True:
+            try:
+                data = await websocket.receive_text()
+                if is_mock:
+                    continue
+                payload = json.loads(data)
+                action = payload.get("action")
+                cmd = None
+                if action == "tap":
+                    cmd = f"adb shell input tap {payload['x']} {payload['y']}"
+                elif action == "swipe":
+                    cmd = f"adb shell input swipe {payload['start_x']} {payload['start_y']} {payload['end_x']} {payload['end_y']} {payload.get('duration', 300)}"
+                elif action == "keyevent":
+                    cmd = f"adb shell input keyevent {payload['keycode']}"
+                
+                if cmd:
+                    process = subprocess.Popen(cmd, shell=True)
+                    await asyncio.to_thread(process.wait)
+            except WebSocketDisconnect:
+                print("Control client disconnected")
+                break
+            except Exception as e:
+                print(f"Control inner error: {e}")
+                await asyncio.sleep(0.5)
+                
+    except WebSocketDisconnect:
+        print("Control client disconnected")
+    except Exception as e:
+        print(f"Control outer error: {e}")
+
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "false"):
+    try:
+        await websocket.accept()
+    except (WebSocketDisconnect, RuntimeError):
+        return
+        
+    is_mock = str(mock).lower() == "true"
+    if is_mock:
+        return
+        
+    process = None
+    try:
+        try:
+            monitor = DeviceMonitor(target=target, os_type="android", mock=is_mock)
+        except Exception as e:
+            print(f"Stream aborted during init: {e}")
+            await websocket.close()
+            return
+            
+        import shutil
+        if not shutil.which("ffmpeg"):
+            await websocket.send_text("[Stream Debug] ERROR: ffmpeg is not installed or not in PATH. Please restart the terminal if you just installed it.")
+            await websocket.close()
+            return
+            
+        # Scrcpy v2+ removed raw h264 record format. We must record to mkv and extract with ffmpeg.
+        # Use scrcpy with ffmpeg via shell pipe.
+        # CRITICAL: Kill any zombie scrcpy-server instances on the Android device!
+        try:
+            subprocess.run(["adb", "shell", "pkill", "app_process"], capture_output=True, timeout=2)
+            await asyncio.sleep(0.5)
+        except:
+            pass
+
+        # We must use gdigrab because --record=- causes Server connection failed on this specific Windows machine.
+        # Force software rendering so gdigrab can capture it correctly!
+        scrcpy_cmd = ["scrcpy", "-m", "1024", "-b", "2M", "--render-driver=software", "--window-title", "PerfHub_Scrcpy", "--no-audio"]
+        global scrcpy_proc
+        scrcpy_proc = subprocess.Popen(scrcpy_cmd)
+        
+        # Wait for the scrcpy window to appear on the desktop
+        await asyncio.sleep(2.0)
+        
+        # Capture the window using ffmpeg gdigrab and output raw H.264
+        # Add -vf scale=512:1104 to force a fixed resolution! If the user resizes the window, the H264 decoder will crash if the resolution changes mid-stream.
+        ffmpeg_cmd = ["ffmpeg", "-loglevel", "warning", "-f", "gdigrab", "-framerate", "30", "-i", "title=PerfHub_Scrcpy", "-vf", "scale=512:1104", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-f", "h264", "pipe:1"]
+        process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        await asyncio.sleep(0.5)
+            
+        if process.poll() is not None:
+            ffmpeg_err = await asyncio.to_thread(process.stderr.read)
+            await websocket.send_text(f"[Stream Debug] ffmpeg gdigrab failed (code {process.returncode}): {ffmpeg_err.decode('utf-8', errors='ignore')}")
+            await websocket.close()
+            return
+                
+        # Background task to drain stderr and prevent pipe deadlock!
+        async def drain_stderr(proc, name):
+            try:
+                while True:
+                    line = await asyncio.to_thread(proc.stderr.readline)
+                    if not line:
+                        break
+                    err_msg = line.decode('utf-8', errors='ignore').strip()
+                    print(f"[{name} Err] {err_msg}")
+                    try:
+                        await websocket.send_text(f"[{name} Err] {err_msg}")
+                    except:
+                        pass
+            except:
+                pass
+                
+        asyncio.create_task(drain_stderr(process, "Stream"))
+            
+        while True:
+            try:
+                # Use read1 to avoid blocking until the buffer is completely full
+                chunk = await asyncio.to_thread(process.stdout.read1, 65536)
+                if not chunk:
+                    break
+                await websocket.send_bytes(chunk)
+            except WebSocketDisconnect:
+                print("Stream client disconnected")
+                break
+            except Exception as e:
+                print(f"Stream inner error: {e}")
+                await asyncio.sleep(1)
+                
+    except WebSocketDisconnect:
+        print("Stream client disconnected")
+    except Exception as e:
+        print(f"Stream outer error: {e}")
+    finally:
+        # We must reference process if it was created
+        if 'process' in locals() and process:
+            try:
+                process.terminate()
+                process.wait()
+            except:
+                pass
+        if 'scrcpy_proc' in locals() and scrcpy_proc:
+            try:
+                scrcpy_proc.terminate()
+                scrcpy_proc.wait()
+            except:
+                pass
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket, target: str = "", os: str = "android", mock: str = "false"):
+    try:
+        await websocket.accept()
+    except (WebSocketDisconnect, RuntimeError):
+        return
+        
+    is_mock = str(mock).lower() == "true"
+    process = None
+    import random
+    
+    try:
+        monitor = None
+        
+        if is_mock:
+            mock_errors = [
+                "W/NetworkManager: Network connection slow or unstable",
+                "E/AndroidRuntime: FATAL EXCEPTION: main"
+            ]
+            while True:
+                try:
+                    await asyncio.sleep(random.uniform(2.0, 5.0))
+                    error_msg = random.choice(mock_errors)
+                    timestamp = datetime.now().strftime("%m-%d %H:%M:%S.%f")[:-3]
+                    await websocket.send_text(f"{timestamp}  12345 12345 {error_msg}")
+                except WebSocketDisconnect:
+                    break
+                except Exception:
+                    await asyncio.sleep(1)
+        else:
+            while True:
+                try:
+                    if not monitor:
+                        monitor = DeviceMonitor(target=target, os_type=os, mock=is_mock)
+                    
+                    if not target or target.lower() == "global":
+                        cmd = "adb logcat -T 1 *:W"
+                    else:
+                        pid = monitor.get_pid()
+                        if not pid:
+                            await websocket.send_text("Error: Cannot find PID for target app")
+                            await asyncio.sleep(2)
+                            continue
+                        cmd = f"adb logcat -T 1 --pid={pid} *:W"
+                        
+                    process = subprocess.Popen(
+                        cmd,
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    
+                    while True:
+                        line = await asyncio.to_thread(process.stdout.readline)
+                        if not line:
+                            # Process died or ended
+                            err = await asyncio.to_thread(process.stderr.read)
+                            if err:
+                                await websocket.send_text(f"Logcat Error: {err.decode('utf-8', errors='ignore')}")
+                            break
+                        await websocket.send_text(line.decode('utf-8', errors='replace').strip())
+                        
+                    # If we broke out of the inner loop, it means process ended. Sleep before restarting to avoid tight loop.
+                    await asyncio.sleep(2)
+                    
+                except WebSocketDisconnect:
+                    print("Logs client disconnected")
+                    break
+                except Exception as e:
+                    import traceback
+                    error_str = str(e) or repr(e)
+                    await websocket.send_text(f'{{"status_code": 500, "error_message": "{error_str}"}}')
+                    await asyncio.sleep(2)
+                    
+    except WebSocketDisconnect:
+        print("Logs client disconnected")
+    except Exception as e:
+        print(f"Logs error: {e}")
+    finally:
+        if process:
+            try:
+                process.terminate()
+                process.wait()
+            except:
+                pass
+
+if __name__ == "__main__":
+    # Allow running directly via python server.py
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+</file>
+
+<file path="test_chaining.py">
+import subprocess
+import time
+import os
+
+scrcpy_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy.exe'
+
+# Find ffmpeg path
+try:
+    ffmpeg_path = subprocess.check_output(["where", "ffmpeg"]).decode().split('\n')[0].strip()
+except:
+    ffmpeg_path = 'ffmpeg' # Fallback
+
+print("Found ffmpeg at:", ffmpeg_path)
+
+scrcpy_cmd = [scrcpy_path, "-V", "error", "-m", "1024", "-b", "2M", "--no-window", "--no-audio", "--video-codec=h264", "--record-format=mkv", "--record=-"]
+ffmpeg_cmd = [ffmpeg_path, "-loglevel", "warning", "-i", "pipe:0", "-c:v", "copy", "-f", "h264", "-flush_packets", "1", "pipe:1"]
+
+scrcpy_proc = subprocess.Popen(scrcpy_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+process = subprocess.Popen(ffmpeg_cmd, stdin=scrcpy_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+print("Started processes. Waiting for data...")
+try:
+    data = process.stdout.read(100)
+    print(f"Read {len(data)} bytes from ffmpeg")
+except Exception as e:
+    print("Error reading:", e)
+
+scrcpy_proc.terminate()
+process.terminate()
+</file>
+
+<file path="test_concurrent_read.py">
+import subprocess
+import time
+import os
+
+scrcpy_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy.exe'
+record_file = "test_stream.mkv"
+
+if os.path.exists(record_file):
+    os.remove(record_file)
+
+cmd = [scrcpy_path, "-m", "1024", "-b", "2M", "--no-window", "--no-audio", "--video-codec=h264", "--record-format=mkv", f"--record={record_file}"]
+
+print("Starting scrcpy to file...")
+p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+time.sleep(2)
+
+try:
+    with open(record_file, "rb") as f:
+        print("Success! Can read file while it's being written.")
+        data = f.read(100)
+        print(f"Read {len(data)} bytes: {data[:20]}")
+except Exception as e:
+    print(f"Failed to read file: {e}")
+
+p.terminate()
+</file>
+
+<file path="test_debug.py">
+import subprocess
+
+scrcpy_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy.exe'
+cmd = [scrcpy_path, '-V', 'debug', '-m', '1024', '-b', '2M', '--no-window', '--no-audio', '--video-codec=h264', '--record-format=mkv', '--record=-']
+
+try:
+    p = subprocess.run(cmd, capture_output=True, timeout=5)
+    print("Stdout len:", len(p.stdout))
+    print(p.stderr.decode('utf-8', errors='ignore'))
+except subprocess.TimeoutExpired as e:
+    print("Timeout! Stdout len:", len(e.stdout) if e.stdout else 0)
+    if e.stderr:
+        print(e.stderr.decode('utf-8', errors='ignore'))
+    else:
+        print("No stderr captured.")
+</file>
+
+<file path="test_ffmpeg.py">
+import subprocess
+
+scrcpy_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy.exe'
+cmd = f'"{scrcpy_path}" -V error -m 1024 -b 2M --no-window --no-audio --video-codec=h264 --record-format=mkv --record=- | ffmpeg -loglevel warning -i pipe:0 -c:v copy -f h264 -flush_packets 1 pipe:1'
+
+try:
+    p = subprocess.run(cmd, shell=True, capture_output=True, timeout=5)
+    print("Stdout len:", len(p.stdout))
+    print(p.stderr.decode('utf-8', errors='ignore'))
+except subprocess.TimeoutExpired as e:
+    print("Timeout! Stdout len:", len(e.stdout) if e.stdout else 0)
+    if e.stderr:
+        print(e.stderr.decode('utf-8', errors='ignore'))
+    else:
+        print("No stderr captured.")
+</file>
+
+<file path="test_record.py">
+import subprocess
+import time
+
+scrcpy_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy.exe'
+cmd = [scrcpy_path, "-m", "1024", "-b", "2M", "--no-window", "--no-audio", "--video-codec=h264", "--record-format=mkv", "--record=test.mkv"]
+
+print("Starting scrcpy to file...")
+p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+time.sleep(3)
+if p.poll() is not None:
+    print("Scrcpy exited!", p.returncode)
+    print("Stderr:", p.stderr.read().decode('utf-8', errors='ignore'))
+else:
+    print("Scrcpy is still running!")
+    p.terminate()
+</file>
+
+<file path="test_render_driver.py">
+import subprocess
+import time
+
+scrcpy_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy.exe'
+
+print("Testing scrcpy --render-driver=software...")
+try:
+    p = subprocess.run([scrcpy_path, "--render-driver=software", "--version"], capture_output=True, timeout=5)
+    print("Return code:", p.returncode)
+    if p.stderr:
+        print("Stderr:", p.stderr.decode('utf-8', errors='ignore'))
+    print("Stdout:", p.stdout.decode('utf-8', errors='ignore'))
+except Exception as e:
+    print(f"Error: {e}")
+</file>
+
+<file path="test_scrcpy.py">
+import subprocess
+import time
+import os
+
+scrcpy_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy.exe'
+ffmpeg_path = r'C:\ffmpeg\bin\ffmpeg.exe' # Need to find ffmpeg too? Let's just test scrcpy first.
+
+print("Starting scrcpy with pipe...")
+# We emulate exactly what the server does:
+cmd = f'"{scrcpy_path}" -V error -m 1024 -b 2M --no-window --no-audio --video-codec=h264 --record-format=mkv --record=-'
+p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+print("Reading from pipe...")
+try:
+    data = p.stdout.read(100)
+    print(f"Read {len(data)} bytes")
+    print(data.hex())
+except Exception as e:
+    print(f"Error reading: {e}")
+
+time.sleep(2)
+print("Process alive:", p.poll() is None)
+p.terminate()
+</file>
+
+<file path="test_screenrecord.py">
+import subprocess
+import os
+
+adb_path = r'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\adb.exe'
+cmd = [adb_path, "exec-out", "screenrecord", "--output-format=h264", "--size", "1024x2216", "-"]
+
+print("Starting adb screenrecord...")
+p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+try:
+    data = p.stdout.read(100)
+    print(f"Read {len(data)} bytes: {data[:20]}")
+except Exception as e:
+    print(f"Failed to read: {e}")
+
+p.terminate()
+</file>
+
+</files>

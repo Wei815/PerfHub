@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { Play, Pause, Trash2, Download, Activity, Cpu, HardDrive, Smartphone, Info, Wifi, WifiOff, Globe } from 'lucide-react';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -7,9 +7,11 @@ import LogTerminal from './components/LogTerminal';
 import './index.css';
 
 function App() {
-  const [targetPackage, setTargetPackage] = useState('com.example.app');
+  const [targetPackage, setTargetPackage] = useState('');
   const [isMockMode, setIsMockMode] = useState(false);
-  const [inputPackage, setInputPackage] = useState('com.example.app');
+  const [inputPackage, setInputPackage] = useState('');
+  const [availablePackages, setAvailablePackages] = useState([]);
+
   const toggleMockMode = () => setIsMockMode(prev => !prev);
   const {
     data,
@@ -23,6 +25,18 @@ function App() {
     clearData,
     exportCSV
   } = useWebSocket('ws://127.0.0.1:8000/ws/perf', targetPackage, isMockMode);
+
+  // Fetch package list
+  useEffect(() => {
+    fetch(`http://127.0.0.1:8000/api/packages?mock=${isMockMode}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.packages) {
+          setAvailablePackages(data.packages);
+        }
+      })
+      .catch(err => console.error("Failed to fetch packages:", err));
+  }, [isMockMode]);
 
   const { cpu_percent, memory_mb, fps, rx_kbps, tx_kbps } = currentMetrics;
 
@@ -67,20 +81,33 @@ function App() {
               </div>
               <div className="info-item">
                 <span className="label">目標包名</span>
-                <input 
-                  type="text" 
-                  value={inputPackage}
-                  onChange={(e) => setInputPackage(e.target.value)}
-                  onBlur={() => setTargetPackage(inputPackage)}
-                  onKeyDown={(e) => { if(e.key === 'Enter') setTargetPackage(inputPackage); }}
-                  style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '2px 5px', borderRadius: '4px', fontSize: '0.75rem', width: '130px' }}
-                />
+                <select 
+                  value={targetPackage}
+                  onChange={(e) => {
+                    setInputPackage(e.target.value);
+                    setTargetPackage(e.target.value);
+                  }}
+                  style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '4px', borderRadius: '4px', fontSize: '0.75rem', width: '130px', cursor: 'pointer' }}
+                >
+                  <option value="">Global System (整機)</option>
+                  {availablePackages.map((pkg, idx) => (
+                    <option key={idx} value={pkg}>{pkg}</option>
+                  ))}
+                </select>
               </div>
+              {targetPackage === '' && (
+                <div className="info-item">
+                  <span className="label">監控模式</span>
+                  <span className="value text-success">Global System (整機監控)</span>
+                </div>
+              )}
               <div className="info-item">
                 <span className="label">畫面比例</span>
                 <span className="value">{status === 'error' || !deviceInfo?.resolution_w ? '等待數據...' : `${deviceInfo.resolution_w}:${deviceInfo.resolution_h}`}</span>
               </div>
             </div>
+            {/* 串流狀態的 Portal 容器 */}
+            <div id="stream-status-portal" style={{ marginTop: '1rem' }}></div>
           </div>
 
           <div className="panel-section mt-auto">
@@ -113,14 +140,13 @@ function App() {
           <div style={{ flex: '1 1 65%', display: 'flex', flexDirection: 'column', width: '100%', padding: '1rem', minHeight: 0 }}>
             <DeviceScreen target={targetPackage} isMockMode={isMockMode} targetWidth={status === 'error' || !deviceInfo?.resolution_w ? 1080 : deviceInfo.resolution_w} targetHeight={status === 'error' || !deviceInfo?.resolution_h ? 2400 : deviceInfo.resolution_h} />
           </div>
-          <LogTerminal target={targetPackage} isMockMode={isMockMode} />
         </main>
 
         {/* ================= 右欄：效能數據監控 ================= */}
-        <aside className="right-panel">
+        <aside className="right-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
           
           {/* 頂部：數據指標卡片 */}
-          <div className="metrics-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+          <div className="metrics-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)', flexShrink: 0 }}>
             <div className={`metric-card glass-panel ${isCpuDanger ? 'danger' : ''}`}>
               <div className="metric-label"><Cpu size={14}/> CPU Usage</div>
               <div className="metric-value">{cpu_percent.toFixed(1)}<span>%</span></div>
@@ -142,8 +168,8 @@ function App() {
             </div>
           </div>
 
-          {/* 下方：折線圖列表 (支援捲動) */}
-          <div className="charts-scroll-area">
+          {/* 中間：折線圖列表 (支援捲動) */}
+          <div className="charts-scroll-area custom-scrollbar" style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingRight: '4px', display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
             <div className="chart-box glass-panel">
               <h3>CPU 趨勢 (%)</h3>
               <div className="chart-container">
@@ -220,6 +246,10 @@ function App() {
                 <span>0</span>
               </div>
             </div>
+          </div>
+          
+          <div style={{ height: '250px', flexShrink: 0, marginTop: '1rem', display: 'flex', flexDirection: 'column' }}>
+            <LogTerminal target={targetPackage} isMockMode={isMockMode} />
           </div>
         </aside>
       </div>

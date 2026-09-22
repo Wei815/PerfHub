@@ -305,7 +305,7 @@ button:disabled {
 
 /* ---------- 新增 LogTerminal 樣式 ---------- */
 .log-terminal-container {
-  flex: 0 0 35%;
+  flex: 1;
   width: 100%;
   background-color: #09090b;
   border-top: 1px solid rgba(255,255,255,0.08);

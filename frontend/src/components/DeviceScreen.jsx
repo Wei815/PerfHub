@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import JMuxer from 'jmuxer';
 
 const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHeight = 2400, isMockMode = false }) => {
@@ -8,6 +9,8 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
   const jmuxerRef = useRef(null);
 
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamDebugMsg, setStreamDebugMsg] = useState("");
+  const [bytesReceived, setBytesReceived] = useState(0);
   
   // Drag state for swipe
   const isDragging = useRef(false);
@@ -15,14 +18,23 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
   const startTime = useRef(0);
 
   useEffect(() => {
+    let isMounted = true;
     if (isMockMode) return;
+    
+    setStreamDebugMsg("");
 
     // Setup Control WebSocket
     const controlUrl = new URL('ws://127.0.0.1:8000/ws/control');
     controlUrl.searchParams.set('target', target);
     controlUrl.searchParams.set('mock', 'false');
     controlWsRef.current = new WebSocket(controlUrl.toString());
-    controlWsRef.current.onopen = () => console.log('Control WS connected');
+    controlWsRef.current.onopen = () => {
+      if (!isMounted) return;
+      console.log('Control WS connected');
+    };
+    controlWsRef.current.onerror = (e) => {
+      if (!isMounted) return;
+    };
 
     // Setup Stream WebSocket
     const streamUrl = new URL('ws://127.0.0.1:8000/ws/stream');
@@ -32,6 +44,7 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
     streamWsRef.current.binaryType = 'arraybuffer';
     
     streamWsRef.current.onopen = () => {
+      if (!isMounted) return;
       console.log('Stream WS connected');
       setIsStreaming(true);
       
@@ -45,22 +58,66 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
     };
 
     streamWsRef.current.onmessage = (event) => {
-      if (jmuxerRef.current) {
-        jmuxerRef.current.feed({
-          video: new Uint8Array(event.data)
+      if (!isMounted) return;
+      if (typeof event.data === 'string') {
+        console.warn("Stream Debug:", event.data);
+        setStreamDebugMsg(prev => prev + event.data + "\n");
+        return;
+      }
+      
+      if (event.data instanceof ArrayBuffer) {
+        setBytesReceived(prev => prev + event.data.byteLength);
+        if (jmuxerRef.current) {
+          jmuxerRef.current.feed({
+            video: new Uint8Array(event.data)
+          });
+        }
+      } else if (event.data instanceof Blob) {
+        setBytesReceived(prev => prev + event.data.size);
+        event.data.arrayBuffer().then(buffer => {
+          if (jmuxerRef.current) {
+            jmuxerRef.current.feed({
+              video: new Uint8Array(buffer)
+            });
+          }
         });
       }
     };
 
     streamWsRef.current.onclose = () => {
+      if (!isMounted) return;
       console.log('Stream WS closed');
       setIsStreaming(false);
     };
+    
+    streamWsRef.current.onerror = (e) => {
+      if (!isMounted) return;
+    };
 
     return () => {
-      if (streamWsRef.current) streamWsRef.current.close();
-      if (controlWsRef.current) controlWsRef.current.close();
-      if (jmuxerRef.current) jmuxerRef.current.destroy();
+      isMounted = false;
+      if (streamWsRef.current) {
+        const streamSocket = streamWsRef.current;
+        if (streamSocket.readyState === WebSocket.CONNECTING) {
+          streamSocket.onopen = () => streamSocket.close();
+        } else if (streamSocket.readyState === WebSocket.OPEN) {
+          streamSocket.close();
+        }
+        streamWsRef.current = null;
+      }
+      if (controlWsRef.current) {
+        const controlSocket = controlWsRef.current;
+        if (controlSocket.readyState === WebSocket.CONNECTING) {
+          controlSocket.onopen = () => controlSocket.close();
+        } else if (controlSocket.readyState === WebSocket.OPEN) {
+          controlSocket.close();
+        }
+        controlWsRef.current = null;
+      }
+      if (jmuxerRef.current) {
+        jmuxerRef.current.destroy();
+        jmuxerRef.current = null;
+      }
     };
   }, [target, isMockMode]);
 
@@ -134,7 +191,7 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
   };
 
   return (
-    <div className="device-screen-container glass-panel">
+    <div className="device-screen-container glass-panel flex-1 min-h-0">
       <h3>Remote Device Screen</h3>
       <div className="canvas-wrapper" style={{ position: 'relative', display: 'flex', justifyContent: 'center', flex: 1, minHeight: 0 }}>
         {isMockMode ? (
@@ -177,8 +234,15 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
             `}</style>
           </div>
         ) : (
-          <canvas
+          <video
             ref={canvasRef}
+            autoPlay
+            muted
+            playsInline
+            onError={(e) => {
+              const err = e.target.error;
+              setStreamDebugMsg(prev => prev + `[Video Error] Code ${err?.code}: ${err?.message || 'Unknown playback error'}\n`);
+            }}
             style={{
               height: '100%',
               width: '100%',
@@ -186,17 +250,40 @@ const DeviceScreen = ({ target = 'com.example.app', targetWidth = 1080, targetHe
               backgroundColor: '#000',
               cursor: 'pointer',
               border: '1px solid rgba(255,255,255,0.2)',
-              borderRadius: '8px'
+              borderRadius: '8px',
+              objectFit: 'contain'
             }}
             onMouseDown={handleMouseDown}
             onMouseUp={handleMouseUp}
             onMouseLeave={handleMouseLeave}
           />
         )}
-        {!isMockMode && !isStreaming && (
+        {!isMockMode && !isStreaming && !streamDebugMsg && (
           <div style={{ position: 'absolute', top: '50%', color: 'var(--text-secondary)' }}>
             Waiting for stream...
           </div>
+        )}
+        {document.getElementById('stream-status-portal') && createPortal(
+          <div style={{
+            background: 'rgba(0,0,0,0.4)',
+            border: '1px solid rgba(255,255,255,0.1)',
+            color: '#10b981',
+            padding: '10px',
+            borderRadius: '8px',
+            fontFamily: 'monospace',
+            fontSize: '11px',
+            wordWrap: 'break-word',
+            whiteSpace: 'pre-wrap'
+          }}>
+            <div>Stream WS: <span style={{color: isStreaming ? '#10b981' : '#f43f5e'}}>{isStreaming ? "Connected" : "Disconnected"}</span></div>
+            <div style={{color: '#94a3b8'}}>Bytes Received: {bytesReceived.toLocaleString()} bytes</div>
+            {streamDebugMsg && (
+              <div style={{ color: '#f43f5e', marginTop: '5px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '5px' }}>
+                {streamDebugMsg}
+              </div>
+            )}
+          </div>,
+          document.getElementById('stream-status-portal')
         )}
       </div>
       <div className="device-controls" style={{ display: 'flex', gap: '1rem', justifyContent: 'center', marginTop: '1rem', paddingBottom: '0.5rem' }}>

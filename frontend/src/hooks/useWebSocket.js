@@ -17,6 +17,7 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
   const [isRecording, setIsRecording] = useState(true);
   
   const ws = useRef(null);
+  const isConnecting = useRef(false);
   const dataRef = useRef([]);
   const isRecordingRef = useRef(isRecording);
   const mockIntervalRef = useRef(null);
@@ -26,17 +27,19 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
     isRecordingRef.current = isRecording;
   }, [isRecording]);
 
-  const connect = useCallback(() => {
-    if (ws.current) {
-        ws.current.close();
-        ws.current = null;
-    }
+  useEffect(() => {
+    let isMounted = true;
+
+    if (ws.current || isConnecting.current) return;
+    isConnecting.current = true;
+
     if (mockIntervalRef.current) {
         clearInterval(mockIntervalRef.current);
         mockIntervalRef.current = null;
     }
 
     if (isMockMode) {
+      if (!isMounted) return;
       setStatus('connected');
       setErrorMessage('');
       setDeviceInfo({
@@ -48,6 +51,7 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
       });
 
       mockIntervalRef.current = setInterval(() => {
+        if (!isMounted) return;
         const m = mockMetricsRef.current;
         m.cpu = Math.max(0, Math.min(100, m.cpu + (Math.random() * 6 - 3)));
         m.memory = Math.max(100, Math.min(2048, m.memory + (Math.random() * 40 - 20)));
@@ -82,9 +86,18 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
           });
         }
       }, 1000);
-      return;
+      
+      return () => {
+        isMounted = false;
+        if (mockIntervalRef.current) {
+            clearInterval(mockIntervalRef.current);
+            mockIntervalRef.current = null;
+        }
+        isConnecting.current = false;
+      };
     }
 
+    if (!isMounted) return;
     setStatus('connecting');
     const targetUrl = new URL(url);
     targetUrl.searchParams.set('target', target);
@@ -92,12 +105,15 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
     ws.current = new WebSocket(targetUrl.toString());
 
     ws.current.onopen = () => {
+      if (!isMounted) return;
       console.log('WS connected to', targetUrl.toString());
+      isConnecting.current = false;
       setStatus('connected');
       setErrorMessage('');
     };
 
     ws.current.onmessage = (event) => {
+      if (!isMounted) return;
       try {
         const payload = JSON.parse(event.data);
         
@@ -141,18 +157,50 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
       }
     };
 
-    ws.current.onclose = () => {
+    ws.current.onclose = (event) => {
+      if (!isMounted) return;
       console.log('WS closed');
-      setStatus('disconnected');
+      if (event && event.code !== 1000 && event.code !== 1005) {
+          console.warn('WebSocket 異常斷線:', event.code, event.reason);
+      }
+      isConnecting.current = false;
+      setStatus((prev) => prev === 'error' ? 'error' : 'disconnected');
       ws.current = null;
     };
 
     ws.current.onerror = (error) => {
+      if (!isMounted) return;
       console.error('WS error:', error);
+      isConnecting.current = false;
       setStatus('error');
       setErrorMessage('WebSocket connection failed');
     };
+
+    return () => {
+      isMounted = false;
+      if (ws.current) {
+        const socket = ws.current;
+        if (socket.readyState === WebSocket.CONNECTING) {
+          socket.onopen = () => socket.close();
+        } else if (socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+        ws.current = null;
+      }
+      if (mockIntervalRef.current) {
+          clearInterval(mockIntervalRef.current);
+          mockIntervalRef.current = null;
+      }
+      isConnecting.current = false;
+    };
   }, [url, target, isMockMode]);
+
+  // Update recording state handler dependency correctly
+  useEffect(() => {
+    if(ws.current) {
+      // Re-bind to use updated isRecording if needed, though state is accessed in setter
+    }
+  }, [isRecording]);
 
   const disconnect = useCallback(() => {
     if (ws.current) {
@@ -162,6 +210,15 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
     if (mockIntervalRef.current) {
         clearInterval(mockIntervalRef.current);
         mockIntervalRef.current = null;
+    }
+    isConnecting.current = false;
+  }, []);
+
+  const sendCommand = useCallback((cmd) => {
+    if (ws.current && ws.current.readyState === 1) {
+        ws.current.send(JSON.stringify(cmd));
+    } else {
+        console.warn("WebSocket is not open, cannot send.");
     }
   }, []);
 
@@ -194,18 +251,6 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
     document.body.removeChild(link);
   }, [data]);
 
-  useEffect(() => {
-    connect();
-    return () => disconnect();
-  }, [connect, disconnect]);
-
-  // Update recording state handler dependency correctly
-  useEffect(() => {
-    if(ws.current) {
-      // Re-bind to use updated isRecording if needed, though state is accessed in setter
-    }
-  }, [isRecording]);
-
   return {
     data,
     currentMetrics,
@@ -216,6 +261,7 @@ export function useWebSocket(url, target = "com.example.app", isMockMode = false
     startRecording,
     pauseRecording,
     clearData,
-    exportCSV
+    exportCSV,
+    sendCommand
   };
 }
