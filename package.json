@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "npm run dev --prefix frontend",
+    "build": "npm run build --prefix frontend && cp -r frontend/dist .",
     "install:frontend": "npm install --prefix frontend",
     "install:backend": "pip install -r backend/requirements.txt"
   }
