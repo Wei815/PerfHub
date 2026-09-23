@@ -14,13 +14,33 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
   const bytesRef = useRef(0);
   const bytesTextRef = useRef(null);
   
+  // Debug states for Click and Move separately
+  const [frontendDebugClick, setFrontendDebugClick] = useState('');
+  const [backendDebugClick, setBackendDebugClick] = useState('');
+  const [frontendDebugMove, setFrontendDebugMove] = useState('');
+  const [backendDebugMove, setBackendDebugMove] = useState('');
+  
   // Recording state
   const [isRecordingDevice, setIsRecordingDevice] = useState(false);
   const mediaRecorderRef = useRef(null);
   const recordedChunks = useRef([]);
+
+  // Video aspect ratio state
+  const [videoAspect, setVideoAspect] = useState(`${targetWidth}/${targetHeight}`);
+  
+  // Visual Drag Calibration State
+  const [isVisualCalibrating, setIsVisualCalibrating] = useState(false);
+  const calibDragStart = useRef(null);
+  const [calibDragCurrent, setCalibDragCurrent] = useState(null);
+  
+  const [calibOffsetX, setCalibOffsetX] = useState(0);
+  const [calibOffsetY, setCalibOffsetY] = useState(0);
   
   // Drag state for swipe
   const isDragging = useRef(false);
+  const dragStartCoords = useRef(null);
+  const dragSlopExceeded = useRef(false);
+  const lastMoveTime = useRef(0);
   const startPos = useRef({ x: 0, y: 0 });
   const startTime = useRef(0);
 
@@ -41,6 +61,17 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
     };
     controlWsRef.current.onerror = (e) => {
       if (!isMounted) return;
+    };
+    controlWsRef.current.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === 'debug_click') {
+          setBackendDebugClick(data.info);
+        } else if (data.type === 'debug_move') {
+          setBackendDebugMove(data.info);
+        } else if (data.type === 'stream_debug') {
+        }
+      } catch (err) {}
     };
 
     // Setup Stream WebSocket
@@ -143,16 +174,29 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
   const getRealCoords = (e) => {
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
-    const offsetX = e.clientX - rect.left;
-    const offsetY = e.clientY - rect.top;
+    
+    let clientX, clientY;
+    if (e.changedTouches && e.changedTouches.length > 0) {
+      clientX = e.changedTouches[0].clientX;
+      clientY = e.changedTouches[0].clientY;
+    } else if (e.touches && e.touches.length > 0) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+    
+    const offsetX = clientX - rect.left;
+    const offsetY = clientY - rect.top;
     
     // mapping
-    const relX = offsetX / rect.width;
-    const relY = offsetY / rect.height;
-    const realX = Math.round(relX * targetWidth);
-    const realY = Math.round(relY * targetHeight);
+    const canvasX = clientX - rect.left;
+    const canvasY = clientY - rect.top;
+    const relX = canvasX / rect.width;
+    const relY = canvasY / rect.height;
     
-    return { realX, realY, relX, relY };
+    return { relX, relY, canvasX, canvasY, rectWidth: rect.width, rectHeight: rect.height };
   };
 
   const sendControl = (payload) => {
@@ -163,21 +207,73 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
 
   const handleMouseDown = (e) => {
     isDragging.current = true;
-    const { relX, relY } = getRealCoords(e);
-    sendControl({ action: 'down', relX, relY });
+    dragSlopExceeded.current = false;
+    const { relX, relY, canvasX, canvasY, rectWidth, rectHeight } = getRealCoords(e);
+    
+    dragStartCoords.current = { canvasX, canvasY };
+
+    if (isVisualCalibrating) {
+      calibDragStart.current = { relX, relY, canvasX, canvasY };
+      setCalibDragCurrent({ canvasX, canvasY });
+      return; // Intercept click for calibration
+    }
+
+    const finalRelX = relX + calibOffsetX;
+    const finalRelY = relY + calibOffsetY;
+    
+    setFrontendDebugClick(`Frontend (Click): => relX=${finalRelX.toFixed(3)}, relY=${finalRelY.toFixed(3)}`);
+    sendControl({ action: 'down', relX: finalRelX, relY: finalRelY });
   };
 
   const handleMouseMove = (e) => {
-    if (!isDragging.current) return;
-    const { relX, relY } = getRealCoords(e);
-    sendControl({ action: 'move', relX, relY });
+    const { relX, relY, canvasX, canvasY, rectWidth, rectHeight } = getRealCoords(e);
+    const finalRelX = relX + calibOffsetX;
+    const finalRelY = relY + calibOffsetY;
+
+    if (!isDragging.current) {
+      // Just hover
+      const now = Date.now();
+      if (now - lastMoveTime.current < 50) return; // limit to 20fps
+      lastMoveTime.current = now;
+      sendControl({ action: 'hover', relX: finalRelX, relY: finalRelY });
+      return;
+    }
+
+    // Apply 5 pixel slop threshold before considering it a swipe
+    if (!dragSlopExceeded.current && dragStartCoords.current) {
+      const dist = Math.hypot(canvasX - dragStartCoords.current.canvasX, canvasY - dragStartCoords.current.canvasY);
+      if (dist < 5) return;
+      dragSlopExceeded.current = true; // Mark as a real swipe
+    }
+
+    if (isVisualCalibrating && calibDragStart.current) {
+      setCalibDragCurrent({ canvasX, canvasY });
+      return;
+    }
+    
+    setFrontendDebugMove(`Frontend (Move): => relX=${finalRelX.toFixed(3)}, relY=${finalRelY.toFixed(3)}`);
+    sendControl({ action: 'move', relX: finalRelX, relY: finalRelY });
   };
 
   const handleMouseUp = (e) => {
     if (!isDragging.current) return;
     isDragging.current = false;
     const { relX, relY } = getRealCoords(e);
-    sendControl({ action: 'up', relX, relY });
+
+    if (isVisualCalibrating && calibDragStart.current) {
+      const deltaRelX = relX - calibDragStart.current.relX;
+      const deltaRelY = relY - calibDragStart.current.relY;
+      setCalibOffsetX(prev => prev + deltaRelX);
+      setCalibOffsetY(prev => prev + deltaRelY);
+      calibDragStart.current = null;
+      setCalibDragCurrent(null);
+      setIsVisualCalibrating(false); // auto-close after 1 drag
+      return;
+    }
+
+    const finalRelX = relX + calibOffsetX;
+    const finalRelY = relY + calibOffsetY;
+    sendControl({ action: 'up', relX: finalRelX, relY: finalRelY });
   };
 
   const handleMouseLeave = (e) => {
@@ -186,7 +282,25 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
     }
   };
 
+
+  const handleTouchStart = (e) => {
+    if (e.touches.length > 0) {
+      handleMouseDown(e);
+    }
+  };
+
+  const handleTouchMove = (e) => {
+    if (e.touches.length > 0) {
+      handleMouseMove(e);
+    }
+  };
+
+  const handleTouchEnd = (e) => {
+    handleMouseUp(e);
+  };
+
   const handleKeyevent = (keycode) => {
+
     sendControl({
       action: 'keyevent',
       keycode: keycode
@@ -261,7 +375,7 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
           <div style={{
             height: '100%',
             maxWidth: '100%',
-            aspectRatio: `${targetWidth}/${targetHeight}`,
+            aspectRatio: videoAspect,
             background: 'linear-gradient(180deg, #1e293b 0%, #0f172a 100%)',
             border: '1px solid rgba(255,255,255,0.2)',
             borderRadius: '12px',
@@ -302,6 +416,11 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
             autoPlay
             muted
             playsInline
+            onLoadedMetadata={(e) => {
+              if (e.target.videoWidth && e.target.videoHeight) {
+                setVideoAspect(`${e.target.videoWidth}/${e.target.videoHeight}`);
+              }
+            }}
             onError={(e) => {
               const err = e.target.error;
               setStreamDebugMsg(prev => prev + `[Video Error] Code ${err?.code}: ${err?.message || 'Unknown playback error'}\n`);
@@ -309,9 +428,9 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
             style={{
               height: '100%',
               maxWidth: '100%',
-              aspectRatio: `${targetWidth}/${targetHeight}`,
+              aspectRatio: videoAspect,
               backgroundColor: '#000',
-              cursor: 'pointer',
+              cursor: 'default',
               border: '1px solid rgba(255,255,255,0.2)',
               borderRadius: '8px',
               objectFit: 'fill'
@@ -323,6 +442,30 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
             onDragStart={(e) => e.preventDefault()}
           />
         )}
+        
+        {/* Visual Calibration Overlay Line */}
+        {isVisualCalibrating && calibDragStart.current && calibDragCurrent && (
+          <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 10 }}>
+            <line 
+              x1={calibDragStart.current.canvasX} 
+              y1={calibDragStart.current.canvasY} 
+              x2={calibDragCurrent.canvasX} 
+              y2={calibDragCurrent.canvasY} 
+              stroke="#10b981" 
+              strokeWidth="3" 
+              strokeDasharray="5,5" 
+            />
+            <circle cx={calibDragStart.current.canvasX} cy={calibDragStart.current.canvasY} r="4" fill="#f43f5e" />
+            <circle cx={calibDragCurrent.canvasX} cy={calibDragCurrent.canvasY} r="4" fill="#10b981" />
+          </svg>
+        )}
+
+        {isVisualCalibrating && (
+          <div style={{ position: 'absolute', top: '10%', left: '50%', transform: 'translateX(-50%)', background: 'rgba(16,185,129,0.9)', color: '#fff', padding: '12px 24px', borderRadius: '8px', fontSize: '14px', fontWeight: 'bold', textAlign: 'center', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', zIndex: 10, pointerEvents: 'none' }}>
+            教學：請在畫面上，從【實際錯誤發生的位置】，<br/>按住滑鼠【拖曳】到【你原本想點擊的目標位置】！<br/>系統會自動算出偏差值並修正。
+          </div>
+        )}
+
         {!isMockMode && !isStreaming && !streamDebugMsg && (
           <div style={{ position: 'absolute', top: '50%', color: 'var(--text-secondary)' }}>
             Waiting for stream...
@@ -342,6 +485,24 @@ const DeviceScreen = memo(({ target = 'com.example.app', targetWidth = 1080, tar
           }}>
             <div>Stream WS: <span style={{color: isStreaming ? '#10b981' : '#f43f5e'}}>{isStreaming ? "Connected" : "Disconnected"}</span></div>
             <div style={{color: '#94a3b8'}} ref={bytesTextRef}>Bytes Received: 0 bytes</div>
+            <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+              <div style={{ fontWeight: 'bold', color: '#fff', marginBottom: '5px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>測試資訊 (Debug Info)</span>
+              </div>
+              
+              <div style={{ fontSize: '11px', marginBottom: '8px', borderBottom: '1px dotted rgba(255,255,255,0.1)', paddingBottom: '8px' }}>
+                <div style={{ color: '#fff', fontWeight: 'bold', marginBottom: '4px' }}>📌 【點擊資訊 (Click)】</div>
+                <span style={{ color: '#fbbf24' }}>{frontendDebugClick || "Waiting for click..."}</span><br/>
+                <span style={{ color: '#38bdf8' }}>{backendDebugClick || "Waiting for backend..."}</span>
+              </div>
+              
+              <div style={{ fontSize: '11px', marginBottom: '4px' }}>
+                <div style={{ color: '#fff', fontWeight: 'bold', marginBottom: '4px' }}>🔄 【滑動資訊 (Swipe/Move)】</div>
+                <span style={{ color: '#fbbf24' }}>{frontendDebugMove || "Waiting for move..."}</span><br/>
+                <span style={{ color: '#38bdf8' }}>{backendDebugMove || "Waiting for backend..."}</span>
+              </div>
+            </div>
+            
             {streamDebugMsg && (
               <div style={{ color: '#f43f5e', marginTop: '5px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '5px' }}>
                 {streamDebugMsg}

@@ -115,19 +115,33 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
         
     is_mock = str(mock).lower() == "true"
     
-    # Spawn a persistent ADB shell as fallback
-    shell_proc = None
+    phys_w, phys_h = 1080, 2400
+    is_landscape = False
     if not is_mock:
         try:
-            shell_proc = subprocess.Popen(
-                ["adb", "shell"], 
-                stdin=subprocess.PIPE, 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL
-            )
-        except Exception as e:
-            print(f"Failed to start persistent adb shell: {e}")
+            wm_size_out = await asyncio.to_thread(subprocess.check_output, ["adb", "shell", "wm", "size"], text=True, timeout=2)
+            if "Physical size:" in wm_size_out:
+                parts = wm_size_out.split(":")[1].strip().split("x")
+                phys_w, phys_h = int(parts[0]), int(parts[1])
+        except:
+            pass
             
+        try:
+            adb_out = await asyncio.to_thread(subprocess.check_output, ["adb", "shell", "dumpsys", "input"], text=True, timeout=3)
+            for line in adb_out.splitlines():
+                if "SurfaceOrientation" in line:
+                    val = line.split(":")[1].strip()
+                    if val in ["1", "3"]:
+                        is_landscape = True
+                    break
+        except:
+            pass
+            
+    if is_landscape:
+        phys_w, phys_h = max(phys_w, phys_h), min(phys_w, phys_h)
+    else:
+        phys_w, phys_h = min(phys_w, phys_h), max(phys_w, phys_h)
+    
     import ctypes
     from ctypes import wintypes
     
@@ -157,7 +171,8 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
                         if length > 0:
                             buff = ctypes.create_unicode_buffer(length + 1)
                             ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
-                            if buff.value == "PerfHub_Scrcpy":
+                            title = buff.value
+                            if "PerfHub_Scrcpy" in title and "Visual Studio" not in title and "Code" not in title and "Command Prompt" not in title and "PowerShell" not in title:
                                 cached_hwnd = h
                                 return False # Stop enumerating
                         return True
@@ -167,69 +182,84 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
                     ctypes.windll.user32.EnumWindows(enum_func, 0)
                 
                 injected = False
+                debug_info = ""
                 
-                if cached_hwnd:
-                    hwnd = cached_hwnd
+                if cached_hwnd != 0:
                     rect = wintypes.RECT()
-                    ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
-                    w = rect.right - rect.left
-                    h = rect.bottom - rect.top
-                    
-                    if w > 0 and h > 0:
-                        if action == "down" and "relX" in payload:
-                            cx = int(payload["relX"] * w)
-                            cy = int(payload["relY"] * h)
-                            lparam = (cy << 16) | (cx & 0xFFFF)
-                            ctypes.windll.user32.PostMessageW(hwnd, 0x0200, 0, lparam)
-                            ctypes.windll.user32.PostMessageW(hwnd, 0x0201, 1, lparam)
+                    ctypes.windll.user32.GetClientRect(cached_hwnd, ctypes.byref(rect))
+                    cw = rect.right - rect.left
+                    ch = rect.bottom - rect.top
+                    if cw > 0 and ch > 0:
+                        cx = int(payload.get('relX', 0) * cw)
+                        cy = int(payload.get('relY', 0) * ch)
+                        lparam = (cy << 16) | cx
+                        
+                        # Fake focus to ensure SDL2 accepts background input
+                        ctypes.windll.user32.SendMessageW(cached_hwnd, 0x0006, 1, 0) # WM_ACTIVATE WA_ACTIVE
+                        ctypes.windll.user32.SendMessageW(cached_hwnd, 0x0007, 0, 0) # WM_SETFOCUS
+                        if action == "down":
+                            has_moved = False
+                            rel_x = payload.get('relX', 0)
+                            rel_y = payload.get('relY', 0)
+                            debug_info = f"Backend (Down): relX={rel_x:.3f}, relY={rel_y:.3f} | cx={cx}, cy={cy} (Window: {cw}x{ch})"
+                            ctypes.windll.user32.PostMessageW(cached_hwnd, 0x0200, 0, lparam) # Move mouse (not pressed)
+                            ctypes.windll.user32.PostMessageW(cached_hwnd, 0x0201, 1, lparam) # WM_LBUTTONDOWN
                             injected = True
-                        elif action == "move" and "relX" in payload:
-                            cx = int(payload["relX"] * w)
-                            cy = int(payload["relY"] * h)
-                            lparam = (cy << 16) | (cx & 0xFFFF)
-                            ctypes.windll.user32.PostMessageW(hwnd, 0x0200, 1, lparam)
+                        elif action == "move":
+                            has_moved = True
+                            rel_x = payload.get('relX', 0)
+                            rel_y = payload.get('relY', 0)
+                            debug_info = f"Backend (Move): relX={rel_x:.3f}, relY={rel_y:.3f} | cx={cx}, cy={cy}"
+                            ctypes.windll.user32.PostMessageW(cached_hwnd, 0x0200, 1, lparam) # Move mouse (pressed)
                             injected = True
-                        elif action == "up" and "relX" in payload:
-                            cx = int(payload["relX"] * w)
-                            cy = int(payload["relY"] * h)
-                            lparam = (cy << 16) | (cx & 0xFFFF)
-                            ctypes.windll.user32.PostMessageW(hwnd, 0x0200, 0, lparam)
-                            ctypes.windll.user32.PostMessageW(hwnd, 0x0202, 0, lparam)
+                        elif action == "hover":
+                            ctypes.windll.user32.PostMessageW(cached_hwnd, 0x0200, 0, lparam) # Move mouse (not pressed)
                             injected = True
-                        elif action == "keyevent":
-                            # Keyevents can also be injected, but we rely on fallback for now
-                            pass
+                        elif action == "up":
+                            if not has_moved:
+                                await asyncio.sleep(0.15) # 150ms delay to ensure the tap registers on slow Android devices (pure tap only)
+                            ctypes.windll.user32.PostMessageW(cached_hwnd, 0x0202, 0, lparam) # WM_LBUTTONUP
+                            injected = True
                 
-                # If 0ms injection failed (e.g. window not found or keyevent), fallback to adb shell
+                # If PostMessageW failed (e.g. window not found), fallback to ADB (slow but reliable)
                 if not injected:
-                    cmd_str = ""
                     if action == "down":
-                        fallback_state['x'] = payload.get('relX', 0) * 1080 # Approx fallback scale
-                        fallback_state['y'] = payload.get('relY', 0) * 2400
+                        ax = int(payload.get('realX', payload.get('relX', 0) * phys_w))
+                        ay = int(payload.get('realY', payload.get('relY', 0) * phys_h))
+                        debug_info = f"Backend (ADB Fallback): => ax={ax}, ay={ay} (Screen: {phys_w}x{phys_h})"
+                        fallback_state['x'] = ax
+                        fallback_state['y'] = ay
                         fallback_state['time'] = asyncio.get_event_loop().time()
                     elif action == "up":
                         if 'x' in fallback_state:
-                            end_x = payload.get('relX', 0) * 1080
-                            end_y = payload.get('relY', 0) * 2400
+                            end_x = payload.get('realX', payload.get('relX', 0) * phys_w)
+                            end_y = payload.get('realY', payload.get('relY', 0) * phys_h)
                             duration = (asyncio.get_event_loop().time() - fallback_state['time']) * 1000
                             dist = ((end_x - fallback_state['x'])**2 + (end_y - fallback_state['y'])**2)**0.5
                             
                             if dist < 20 and duration < 300:
-                                # Use cmd input tap for faster fallback
-                                cmd_str = f"cmd input tap {int(end_x)} {int(end_y)}\n"
+                                subprocess.Popen(["adb", "shell", "input", "tap", str(int(end_x)), str(int(end_y))], creationflags=subprocess.CREATE_NO_WINDOW)
                             else:
-                                cmd_str = f"cmd input swipe {int(fallback_state['x'])} {int(fallback_state['y'])} {int(end_x)} {int(end_y)} {min(int(duration), 2000)}\n"
+                                subprocess.Popen(["adb", "shell", "input", "swipe", str(int(fallback_state['x'])), str(int(fallback_state['y'])), str(int(end_x)), str(int(end_y)), str(min(int(duration), 2000))], creationflags=subprocess.CREATE_NO_WINDOW)
                             fallback_state.clear()
-                    elif action == "tap": # Legacy fallback
-                        cmd_str = f"cmd input tap {payload['x']} {payload['y']}\n"
-                    elif action == "swipe": # Legacy fallback
-                        cmd_str = f"cmd input swipe {payload['start_x']} {payload['start_y']} {payload['end_x']} {payload['end_y']} {payload.get('duration', 300)}\n"
-                    elif action == "keyevent":
-                        cmd_str = f"cmd input keyevent {payload['keycode']}\n"
+                    elif action == "tap":
+                        subprocess.Popen(["adb", "shell", "input", "tap", str(payload['x']), str(payload['y'])], creationflags=subprocess.CREATE_NO_WINDOW)
+                    elif action == "swipe":
+                        subprocess.Popen(["adb", "shell", "input", "swipe", str(payload['start_x']), str(payload['start_y']), str(payload['end_x']), str(payload['end_y']), str(payload.get('duration', 300))], creationflags=subprocess.CREATE_NO_WINDOW)
+                elif action == "keyevent":
+                    subprocess.Popen(["adb", "shell", "input", "keyevent", str(payload['keycode'])], creationflags=subprocess.CREATE_NO_WINDOW)
                     
-                    if cmd_str and shell_proc and shell_proc.poll() is None:
-                        shell_proc.stdin.write(cmd_str.encode('utf-8'))
-                        shell_proc.stdin.flush()
+                if action == "down" and debug_info:
+                    try:
+                        await websocket.send_json({"type": "debug_click", "info": debug_info})
+                    except Exception as e:
+                        pass
+                elif action == "move" and debug_info:
+                    try:
+                        await websocket.send_json({"type": "debug_move", "info": debug_info})
+                    except Exception as e:
+                        pass
+                        
             except WebSocketDisconnect:
                 print("Control client disconnected")
                 break
@@ -241,13 +271,8 @@ async def websocket_control(websocket: WebSocket, target: str = "", mock: str = 
         print("Control client disconnected")
     except Exception as e:
         print(f"Control outer error: {e}")
-    finally:
-        if shell_proc:
-            try:
-                shell_proc.stdin.close()
-                shell_proc.terminate()
-            except:
-                pass
+
+stream_lock = asyncio.Lock()
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "false"):
@@ -259,6 +284,12 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
     is_mock = str(mock).lower() == "true"
     if is_mock:
         return
+
+    # Enable native Android touch indicators so that user interactions are visible in the frontend and recordings!
+    try:
+        await asyncio.to_thread(subprocess.run, ["adb", "shell", "settings", "put", "system", "show_touches", "1"], timeout=2)
+    except:
+        pass
         
     process = None
     scrcpy_proc = None
@@ -276,60 +307,97 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
             await websocket.close()
             return
             
-        # Kill any zombie scrcpy instances on the PC to prevent port conflicts!
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", "scrcpy.exe"], capture_output=True, timeout=2)
-            subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=2)
-            await asyncio.sleep(0.5)
-        except:
-            pass
+        async with stream_lock:
+            # Kill any zombie scrcpy instances on the PC to prevent port conflicts!
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "scrcpy.exe"], capture_output=True, timeout=2)
+                subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=2)
+                await asyncio.sleep(0.1)
+            except:
+                pass
 
-        # We MUST use gdigrab because --record=- causes Server connection failed (pipe/CRLF corruption) on this specific Windows machine.
-        # Force software rendering so gdigrab can capture it correctly!
-        # Increased quality: max size 1920, bitrate 4M
-        scrcpy_cmd = ["scrcpy", "-m", "1920", "-b", "4M", "--max-fps=30", "--render-driver=software", "--window-title", "PerfHub_Scrcpy", "--no-audio"]
-        
-        print("Spawning new scrcpy window...")
-        scrcpy_proc = subprocess.Popen(scrcpy_cmd)
-        
-        # Wait dynamically for the scrcpy window to appear
-        window_found = False
-        for _ in range(20):
-            def enum_cb_wait(h, _):
-                nonlocal window_found
+            is_landscape = False
+            try:
+                adb_out = await asyncio.to_thread(subprocess.check_output, ["adb", "shell", "dumpsys", "input"], text=True, timeout=3)
+                for line in adb_out.splitlines():
+                    if "SurfaceOrientation" in line:
+                        val = line.split(":")[1].strip()
+                        if val in ["1", "3"]:
+                            is_landscape = True
+                        break
+            except Exception as e:
+                print(f"Failed to get orientation via ADB: {e}")
+
+            # Calculate precise window bounds to prevent letterboxing (black bars) which breaks touch coordinates,
+            # while ensuring scrcpy creates a proper window for ffmpeg to grab.
+            # Window dimensions are no longer forced, scrcpy will automatically size the window based on the device aspect ratio.
+            # Use -m 700 to guarantee the window height fits entirely even on a small 1366x768 laptop screen!
+            # If the window is truncated by the OS, gdigrab captures a cropped video, breaking coordinates and aspect ratio.
+            scrcpy_cmd = ["scrcpy", "-m", "700", "-b", "16M", "--max-fps=30", "--render-driver=software", "--window-title", "PerfHub_Scrcpy", "--no-audio", "--window-borderless"]
+
+
+            print(f"Spawning new scrcpy window (Landscape: {is_landscape})...")
+            scrcpy_proc = subprocess.Popen(scrcpy_cmd)
+            
+            # Wait dynamically for the scrcpy window to appear (up to 5 seconds)
+            window_found = False
+            scrcpy_hwnd = 0
+            for _ in range(50):
+                def enum_cb_wait(h, _):
+                    nonlocal window_found, scrcpy_hwnd
+                    import ctypes
+                    length = ctypes.windll.user32.GetWindowTextLengthW(h)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
+                        title = buff.value
+                        if "PerfHub_Scrcpy" in title and "Visual Studio" not in title and "Code" not in title and "Command Prompt" not in title and "PowerShell" not in title:
+                            # Verify this window belongs to our newly spawned scrcpy process!
+                            pid = ctypes.c_ulong()
+                            ctypes.windll.user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                            if pid.value == scrcpy_proc.pid:
+                                window_found = True
+                                scrcpy_hwnd = h
+                                return False
+                    return True
+                
                 import ctypes
-                length = ctypes.windll.user32.GetWindowTextLengthW(h)
-                if length > 0:
-                    buff = ctypes.create_unicode_buffer(length + 1)
-                    ctypes.windll.user32.GetWindowTextW(h, buff, length + 1)
-                    if buff.value == "PerfHub_Scrcpy":
-                        window_found = True
-                        return False
-                return True
+                CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+                ctypes.windll.user32.EnumWindows(CMPFUNC(enum_cb_wait), 0)
+                
+                if window_found:
+                    await asyncio.sleep(0.5) # Wait for window to fully initialize before ffmpeg grabs it
+                    break
+                await asyncio.sleep(0.1)
+                
+            if not window_found:
+                print("Error: scrcpy window did not appear within 5 seconds. Aborting stream.")
+                if scrcpy_proc:
+                    scrcpy_proc.kill()
+                return
             
-            import ctypes
-            CMPFUNC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
-            ctypes.windll.user32.EnumWindows(CMPFUNC(enum_cb_wait), 0)
-            
-            if window_found:
-                break
-            await asyncio.sleep(0.5)
-        await asyncio.sleep(0.5) # Give it an extra moment to render
-        
-        # Capture the window using ffmpeg gdigrab and output raw H.264
-        # We use a fixed output resolution of 720x1560 to prevent JMuxer crashes when the window is resized.
-        # force_original_aspect_ratio=decrease and pad ensures the aspect ratio is strictly preserved without stretching!
-        vf_scale = "scale=720:1560:force_original_aspect_ratio=decrease,pad=720:1560:(ow-iw)/2:(oh-ih)/2"
-        ffmpeg_cmd = [
-            "ffmpeg", "-loglevel", "warning", "-f", "gdigrab", "-framerate", "30", "-i", "title=PerfHub_Scrcpy", 
-            "-vf", vf_scale, 
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "22", "-f", "h264", "pipe:1"
-        ]
-        process = subprocess.Popen(
-            ffmpeg_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+            # Capture the window using ffmpeg gdigrab and output raw H.264
+            # We use the ADB orientation detected earlier. No need for GetClientRect here anymore.        
+            # Ensure dimensions are even for libx264, but DO NOT pad or force a fixed resolution,
+            # otherwise the touch coordinates on the frontend will be misaligned due to black bars!
+            vf_scale = "scale='trunc(iw/2)*2':'trunc(ih/2)*2'"
+
+            ffmpeg_cmd = [
+                "ffmpeg", "-loglevel", "warning", "-f", "gdigrab", "-framerate", "30", "-i", "title=PerfHub_Scrcpy", 
+                "-vf", vf_scale, 
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-maxrate", "16M",
+                "-bufsize", "32M",
+                "-pix_fmt", "yuv420p",
+                "-f", "h264", "pipe:1"
+            ]
+            process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
         
         await asyncio.sleep(0.5)
             
@@ -349,7 +417,9 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
                     err_msg = line.decode('utf-8', errors='ignore').strip()
                     print(f"[{name} Err] {err_msg}")
                     try:
-                        await websocket.send_text(f"[{name} Err] {err_msg}")
+                        # Only print to backend console, don't flood frontend with benign ffmpeg/scrcpy warnings
+                        # await websocket.send_text(f"[{name} Err] {err_msg}")
+                        pass
                     except:
                         pass
             except:
@@ -357,6 +427,32 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
                 
         asyncio.create_task(drain_stderr(scrcpy_proc, "Scrcpy"))
         asyncio.create_task(drain_stderr(process, "Stream"))
+            
+        # Monitor for orientation changes using ADB
+        async def monitor_orientation():
+            try:
+                while True:
+                    await asyncio.sleep(2)
+                    try:
+                        adb_out = await asyncio.to_thread(subprocess.check_output, ["adb", "shell", "dumpsys", "input"], text=True, timeout=2)
+                        current_is_landscape = False
+                        for line in adb_out.split('\n'):
+                            if "SurfaceOrientation" in line:
+                                val = line.split(':')[1].strip()
+                                if val in ["1", "3"]:
+                                    current_is_landscape = True
+                                break
+                        if current_is_landscape != is_landscape:
+                            print(f"Orientation changed via ADB! (Landscape: {current_is_landscape}). Restarting stream.")
+                            if process:
+                                process.terminate()
+                            break
+                    except Exception as e:
+                        pass
+            except Exception:
+                pass
+                
+        monitor_task = asyncio.create_task(monitor_orientation())
             
         while True:
             try:
@@ -372,6 +468,8 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
                 print(f"Stream inner error: {e}")
                 await asyncio.sleep(1)
                 
+        monitor_task.cancel()
+                
     except WebSocketDisconnect:
         print("Stream client disconnected")
     except Exception as e:
@@ -380,13 +478,13 @@ async def websocket_stream(websocket: WebSocket, target: str = "", mock: str = "
         if process:
             try:
                 process.terminate()
-                process.wait()
+                process.kill() # Ensure it's dead, non-blocking
             except:
                 pass
         if scrcpy_proc:
             try:
                 scrcpy_proc.terminate()
-                scrcpy_proc.wait()
+                scrcpy_proc.kill() # Ensure it's dead, non-blocking
             except:
                 pass
 

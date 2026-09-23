@@ -66,7 +66,24 @@ const LogTerminal = ({ target = 'com.example.app', isMockMode = false }) => {
         'HwGrsSdk', 'HwConnectivityService', 'CloudAlbumSDK', 'AppLifeChangeSensor',
         'Hicom_PolicyCenterService', 'AwareLog', 'XEngineMpipControl', 'DollieAdapterService',
         'BufferQueueProducer', 'SpannableStringBuilder', 'chromium', 'ServiceManager',
-        'Parcel  :', 'blob    :'
+        'Parcel  :', 'blob    :',
+        // 螢幕旋轉 & GPU 渲染雜訊
+        'SurfaceFlinger', 'media.codec', 'TWGraphicBufferProducer', 'eglSwapBuffers',
+        'mali gles error', 'GL error', 'Invalid output fence',
+        // 華為觸控 & 動作偵測
+        'TS_HAL', 'TS_Service', 'hwTsSetAftAlgoOrientation', 'HwMotionRecognition',
+        'DsSearchIndexablesProvider',
+        // 華為系統設定重建索引
+        'RoundCornerDisplay', 'ExternalAppConfigDataChecker', 'HwEffectHelper',
+        'Sdencryption', 'SdEncryptionUtils', 'BaseSearchIndex', 'antiTheft',
+        'MoreInputMethodSettings', 'WifiSetting', 'WifiTracker',
+        'IndexableItem', 'target is not exported',
+        'com.huawei.android.airsharing', 'DollieActivityManagerAdapter',
+        'HwActivityManagerServiceEx', 'HwActivityNotifierEx',
+        'DE N DES', 'getSupportedInternal',
+        // 華為啟動器 & 搜尋
+        'HiSearch', 'LauncherOverlayService', 'not attached to window manager',
+        'SnapshotStartingWindow', 'com.huawei.intelligent'
       ];
       if (spamKeywords.some(kw => rawText.includes(kw))) {
         return; // 直接略過，不上螢幕
@@ -119,7 +136,10 @@ const LogTerminal = ({ target = 'com.example.app', isMockMode = false }) => {
 
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollIntoView({ behavior: 'smooth' });
+      const parent = scrollRef.current.parentElement;
+      if (parent) {
+        parent.scrollTop = parent.scrollHeight;
+      }
     }
   }, [logs]);
 

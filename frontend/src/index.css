@@ -81,16 +81,85 @@ body {
 .main-layout {
   display: grid;
   grid-template-columns: 320px minmax(400px, 4fr) minmax(450px, 5fr);
+  grid-template-areas: "left center right";
   gap: 2rem;
   flex: 1;
   min-height: 0; /* 讓 Grid 內部可捲動的關鍵 */
 }
 
+/* ===== 橫屏模式：左欄保持原樣，右側上下排列可捲動 ===== */
+.main-layout.landscape-mode {
+  grid-template-columns: 240px 1fr;
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "left center"
+    "left right";
+  gap: 1rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  max-height: calc(100vh - 110px);
+  padding-right: 4px;
+}
+
+/* 橫屏：左欄保持原樣，佔滿整個左側 */
+.main-layout.landscape-mode .left-panel {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: calc(100vh - 130px);
+  overflow-y: auto;
+}
+
+/* 橫屏：中欄（手機畫面）*/
+.main-layout.landscape-mode .center-panel {
+  min-height: 300px;
+  max-height: 55vh;
+  overflow: visible; /* 覆蓋原本的 overflow:hidden，確保觸控事件不被吃掉 */
+}
+
+/* 橫屏：右欄 — 資料全部展開，不再需要內部捲動 */
+.main-layout.landscape-mode .right-panel {
+  overflow: visible;
+  height: auto;
+}
+.main-layout.landscape-mode .right-panel .glass-panel {
+  overflow: visible !important;
+  flex: none !important;
+}
+
+/* 橫屏：圖表區域展開為 2x2 網格，不再內部捲動 */
+.main-layout.landscape-mode .charts-scroll-area {
+  display: grid !important;
+  grid-template-columns: repeat(2, 1fr) !important;
+  gap: 1rem !important;
+  overflow: visible !important;
+  flex: none !important;
+}
+
+/* 橫屏：指標卡片一行四個 */
+.main-layout.landscape-mode .metrics-grid {
+  grid-template-columns: repeat(4, 1fr) !important;
+}
+
+/* 橫屏：Log 終端機固定高度 */
+.main-layout.landscape-mode .log-terminal-wrapper {
+  height: 250px;
+}
+
+/* 橫屏捲軸美化 */
+.main-layout.landscape-mode::-webkit-scrollbar { width: 6px; }
+.main-layout.landscape-mode::-webkit-scrollbar-track { background: transparent; }
+.main-layout.landscape-mode::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 10px; }
+.main-layout.landscape-mode::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+
 /* ---------- 左欄：控制面板 ---------- */
 .left-panel {
+  grid-area: left;
   display: flex;
   flex-direction: column;
   padding: 1.5rem;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .section-title {
@@ -143,6 +212,7 @@ body {
 
 /* ---------- 中欄：手機畫面 ---------- */
 .center-panel {
+  grid-area: center;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -170,11 +240,14 @@ body {
 
 /* ---------- 右欄：數據面板 ---------- */
 .right-panel {
+  grid-area: right;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   min-height: 0;
 }
+
+
 
 .metrics-grid {
   display: grid;
@@ -219,18 +292,19 @@ body {
 }
 .metric-card.danger .metric-value { color: var(--danger-color); }
 
-/* 折線圖捲動區 */
+/* 數據圖表滾動區 */
 .charts-scroll-area {
   flex: 1;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  padding-right: 0.5rem; /* 預留捲動條空間 */
+  padding-right: 0.5rem; /* 預留滾動條空間 */
 }
 
-/* 客製化捲動條 */
-.charts-scroll-area::-webkit-scrollbar { width: 6px; }
+
+/* 自訂滾動條 */
+.charts-scroll-area::-webkit-scrollbar { width: 6px; height: 6px; }
 .charts-scroll-area::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); border-radius: 10px; }
 .charts-scroll-area::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 10px; }
 .charts-scroll-area::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
@@ -239,6 +313,7 @@ body {
   padding: 1rem;
   min-height: 220px;
 }
+
 .chart-box h3 {
   margin: 0 0 1rem 0;
   font-size: 0.9rem;
@@ -303,7 +378,7 @@ button:disabled {
   border-radius: 4px;
 }
 
-/* ---------- 新增 LogTerminal 樣式 ---------- */
+/* ---------- 內部 LogTerminal 樣式 ---------- */
 .log-terminal-container {
   flex: 1;
   width: 100%;
@@ -316,6 +391,16 @@ button:disabled {
   border-bottom-right-radius: 12px;
   box-shadow: inset 0 4px 10px rgba(0,0,0,0.5);
 }
+
+
+.log-terminal-wrapper {
+  height: 180px;
+  flex-shrink: 0;
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+}
+
 
 .log-header {
   display: flex;
@@ -365,3 +450,4 @@ button:disabled {
 .log-body::-webkit-scrollbar-track { background: transparent; }
 .log-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
 .log-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
